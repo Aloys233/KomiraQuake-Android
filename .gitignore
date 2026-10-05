@@ -1,0 +1,25 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# 本机配置（含 SDK 路径），不入库
+local.properties
+
+# 签名密钥：绝不入库
+keystore/
+*.jks
+*.keystore
+
+# IDE / Kotlin
+.idea/
+*.iml
+.kotlin/
+
+# 构建产物
+captures/
+.cxx/
+*.apk
+*.aab
+*.ap_
+*.dex

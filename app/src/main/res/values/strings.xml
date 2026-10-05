@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KomiraQuake</string>
+    <string name="warning_channel_name">地震预警</string>
+    <string name="warning_channel_desc">破坏性地震波到达前的强提醒</string>
+    <string name="guard_channel_name">守护运行</string>
+    <string name="guard_channel_desc">保持后台实时接收地震预警信号</string>
+    <string name="guard_notification_text">正在后台接收实时地震预警</string>
+</resources>
