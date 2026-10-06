@@ -45,28 +45,6 @@ object QuakeCalculator {
 
     fun elapsedSeconds(originEpochMs: Long, nowEpochMs: Long): Double = (nowEpochMs - originEpochMs) / 1000.0
 
-    /** 震中到「中国范围」包围盒最远角点的距离（km），即波前扫过全境所需的半径。 */
-    private fun maxDistanceToChinaKm(lat: Double, lon: Double): Double {
-        val lats = doubleArrayOf(CoordinateTransform.CHINA_MIN_LAT, CoordinateTransform.CHINA_MAX_LAT)
-        val lons = doubleArrayOf(CoordinateTransform.CHINA_MIN_LON, CoordinateTransform.CHINA_MAX_LON)
-        var far = 0.0
-        for (la in lats) {
-            for (lo in lons) far = max(far, haversineDistance(lat, lon, la, lo))
-        }
-        return far
-    }
-
-    /**
-     * P、S 波前是否都已超出中国范围；是则两个波前应一起隐藏（-1 表示已超出量程，按已超出处理）。
-     * 只有两者都离开中国后才隐藏，避免 P 波（更快）先消失而 S 波仍在。
-     */
-    fun bothWavesBeyondChina(lat: Double, lon: Double, pKm: Double, sKm: Double): Boolean {
-        val far = maxDistanceToChinaKm(lat, lon)
-        val pOut = pKm < 0.0 || pKm > far
-        val sOut = sKm < 0.0 || sKm > far
-        return pOut && sOut
-    }
-
     /**
      * 两条报次（实时预警 / 目录）是否描述同一次地震：发震时刻接近且震中邻近。
      * 实时预警与 CENC 目录的事件 ID 格式不同（如 `202609301831.0001` 与 `CC.20260930184025.5`），

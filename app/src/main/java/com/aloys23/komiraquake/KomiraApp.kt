@@ -19,7 +19,7 @@ import com.aloys23.komiraquake.service.AlertAnnouncer
 import com.aloys23.komiraquake.service.AlertSoundService
 import com.aloys23.komiraquake.service.DndController
 import com.aloys23.komiraquake.service.LocationService
-import com.aloys23.komiraquake.service.SpeechService
+import com.aloys23.komiraquake.service.SystemNetworkGate
 import com.aloys23.komiraquake.service.WarningService
 import com.aloys23.komiraquake.ui.map.TileCacheInterceptor
 import kotlinx.coroutines.CoroutineScope
@@ -71,14 +71,20 @@ class AppContainer(private val context: Context) {
     val ntp = NtpTimeService(scope, client)
 
     val sound = AlertSoundService(context)
-    val speech = SpeechService(context)
     val vibrator = com.aloys23.komiraquake.service.VibratorController(context)
-    val announcer = AlertAnnouncer(settings, sound, speech)
+    val announcer = AlertAnnouncer(settings, sound)
 
     /** 勿扰绕过：预警前临时解除 DND，结束后恢复。《NATIVE_PORT_SPEC》 §15。 */
     val dnd = DndController(context, settings, scope)
 
     private val mutedEvents = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * 网络感知：断网时挂起各源的重连退避，恢复即刻重连。
+     * 注册失败（无 ACCESS_NETWORK_STATE 等）时 start() 返回 false，此时本实例恒在线，
+     * 行为与改动前的固定退避一致。
+     */
+    val networkGate = SystemNetworkGate(context)
 
     /** 自定义 NTP 服务器上次应用的取值；用于变更时触发一次即时重校。 */
     private var lastCustomNtp: String? = null
@@ -91,6 +97,7 @@ class AppContainer(private val context: Context) {
             if (policy.dnd) dnd.engage()
             announcer.onWarning(event)
         },
+        networkGate = networkGate,
     )
 
     /** 1Hz 倒计时（秒），供 UI 与全屏预警使用。 */
@@ -110,13 +117,14 @@ class AppContainer(private val context: Context) {
                 CityCoordTable.loadFromString(it.readText())
             }
         }
-        speech.init()
         applySettings(settings.current)
         scope.launch { settings.state.collect { applySettings(it) } }
         scope.launch { observeWarnings() }
     }
 
     fun start() {
+        // 先注册网络回调再启动数据源：反序会让首批连接在「假定在线」下白白空转一轮退避。
+        networkGate.start()
         repository.start()
         // 定位已在 LocationService 构造时恢复；仅有记录才跳过自动 IP，避免覆盖基准地。
         if (!location.state.value.hasLocation) location.requestCurrentPosition()
@@ -127,9 +135,6 @@ class AppContainer(private val context: Context) {
     private fun applySettings(s: Settings) {
         sound.enabled = s.enableSoundAlert
         sound.volume = s.alertVolume.toFloat()
-        speech.enabled = s.enableSpeech
-        speech.rate = s.speechRate.toFloat()
-        speech.volume = s.alertVolume.toFloat()
         AppClock.enable(s.enableNtpSync)
         // 自定义 NTP 服务器变更：立即按新顺序重新校准一次。
         val customNtp = s.customNtpServer.trim()

@@ -8,7 +8,6 @@ import com.aloys23.komiraquake.model.WarningLevel
 class AlertAnnouncer(
     private val settings: SettingsStore,
     private val sound: AlertSoundService,
-    private val speech: SpeechService,
 ) {
     internal class EventState {
         var report = 0
@@ -46,36 +45,21 @@ class AlertAnnouncer(
         val state = stateFor(event)
         val policy = policy(event, state)
         if (!policy.eligible) return
-        // Capture first before setting issued: first reports speak with updates disabled.
         val phase = state.acceptReport(event.reportNum, event.isFinal) ?: return
-        val first = phase.first
-        val newFinal = phase.newFinal
-        if (!policy.audio && !policy.speech) return
+        if (!policy.audio) return
         claimOutput(event.identity)
-        if (policy.audio) {
-            when {
-                first -> sound.play("issue")
-                newFinal -> sound.play("final")
-                else -> sound.play("update", cooldownMs = 3000)
-            }
-            if (event.warningLevel == WarningLevel.CRITICAL && !state.warned) {
-                state.warned = true
-                state.cautioned = true
-                sound.play("warn")
-            } else if (event.warningLevel == WarningLevel.WARNING && !state.cautioned) {
-                state.cautioned = true
-                sound.play("caution")
-            }
+        when {
+            phase.first -> sound.play("issue")
+            phase.newFinal -> sound.play("final")
+            else -> sound.play("update", cooldownMs = 3000)
         }
-        if (policy.speech) {
-            val text = when {
-                newFinal -> "${event.location} 地震，最终报，震级 ${fmt(event.magnitude)}。"
-                first -> "${event.location} 发生地震，预估烈度 ${event.estimatedIntensity}，震级 ${fmt(event.magnitude)}。"
-                event.warningLevel == WarningLevel.CRITICAL -> "严重地震预警，${event.location}，请立即避险。"
-                settings.current.speakUpdates -> "地震预警更新，${event.location}，震级 ${fmt(event.magnitude)}。"
-                else -> ""
-            }
-            speech.speak(text, dedupeKey = "${event.identity}:${event.reportNum}:${event.isFinal}")
+        if (event.warningLevel == WarningLevel.CRITICAL && !state.warned) {
+            state.warned = true
+            state.cautioned = true
+            sound.play("warn")
+        } else if (event.warningLevel == WarningLevel.WARNING && !state.cautioned) {
+            state.cautioned = true
+            sound.play("caution")
         }
     }
 
@@ -84,30 +68,31 @@ class AlertAnnouncer(
         if (event.sWaveArrival == null || !event.warningLevel.isAlert) return
         val state = stateFor(event)
         val policy = policy(event, state)
-        if ((!policy.audio && !policy.speech) || state.arrived) return
+        if (!policy.audio || state.arrived) return
         val seconds = event.remainingSeconds()
         if (seconds !in 1..60 || !state.countdowns.add(seconds)) return
         claimOutput(event.identity)
-        if (policy.audio) {
-            sound.playCountdownClip(seconds)
-            if (seconds <= 10 && !state.intense) {
-                state.intense = true
-                sound.playIntense()
-            }
-        }
-        if (policy.speech && settings.current.speakCountdown && seconds in COUNTDOWN_SPEECH_SECONDS) {
-            speech.speak("预计还有 $seconds 秒。", dedupeKey = "${event.identity}:countdown:$seconds")
+        sound.playCountdownClip(seconds)
+        if (seconds <= 10 && !state.intense) {
+            state.intense = true
+            sound.playIntense()
         }
     }
 
     @Synchronized
     fun onArrived(event: EarthquakeEvent) {
-        if (event.sWaveArrival == null || !event.warningLevel.isAlert) return
+        if (event.sWaveArrival == null) return
         val state = stateFor(event)
         if (state.arrived) return
+        // 不能用当前 warningLevel 判定：晚到的报次可能把等级降级（如 directory 重算为 WATCH），
+        // 那样已经播过的倒计时会在到时凭空断掉、没有抵达播报。
+        // 以「本事件确实播过倒计时」为准，保证倒计时与抵达播报成对出现。
+        if (state.countdowns.isEmpty() && !event.warningLevel.isAlert) return
         state.arrived = true
         if (policy(event, state).audio) {
             claimOutput(event.identity)
+            // 抵达提示：`0s` + 两下计时音走提示通道连播，与 hypocenter 并发。
+            sound.playArrivalCues()
             sound.play("hypocenter", cooldownMs = 10_000)
         }
     }
@@ -115,17 +100,13 @@ class AlertAnnouncer(
     @Synchronized
     fun onMuteChanged() {
         if (settings.current.isMuted) stop()
-        else {
-            if (!settings.current.enableSoundAlert || settings.current.alertVolume <= 0) sound.stopAll()
-            if (!settings.current.enableSpeech || settings.current.alertVolume <= 0) speech.stop()
-        }
+        else if (!settings.current.enableSoundAlert || settings.current.alertVolume <= 0) sound.stopAll()
     }
 
     /** Stop outputs without discarding one-shot markers. */
     @Synchronized
     fun stop() {
         sound.stopAll()
-        speech.stop()
         outputOwner = null
     }
 
@@ -162,9 +143,4 @@ class AlertAnnouncer(
         AlertPolicy.evaluate(event, settings.current, state.muted, state.stopped)
 
     private fun stateFor(event: EarthquakeEvent): EventState = states.getOrPut(event.identity) { EventState() }
-    private fun fmt(magnitude: Double) = "%.1f".format(magnitude)
-
-    companion object {
-        private val COUNTDOWN_SPEECH_SECONDS = setOf(10, 20, 30)
-    }
 }

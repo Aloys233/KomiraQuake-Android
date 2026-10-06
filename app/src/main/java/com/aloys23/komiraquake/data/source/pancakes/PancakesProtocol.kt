@@ -34,12 +34,12 @@ object PancakesProtocol {
         else -> source.uppercase()
     }
 
-    /** 子源展示名。 */
+    /** 报文展示名（HUD 标题）。 */
     fun titleFor(source: String): String = when (source) {
-        SOURCE_GQ -> "GlobalQuake 全球地震"
-        SOURCE_USGS -> "USGS 全球地震"
+        SOURCE_GQ -> "GlobalQuake地震信息"
+        SOURCE_USGS -> "USGS 地震信息"
         SOURCE_JMA_EEW -> "JMA 紧急地震速报"
-        SOURCE_JMA_EQLIST -> "JMA 地震速报"
+        SOURCE_JMA_EQLIST -> "JMA 地震情报"
         else -> source
     }
 

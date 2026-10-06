@@ -16,6 +16,7 @@ data class EarthquakeEvent(
     val depth: Double,
     val location: String,
     val timestamp: Long,
+    /** 数据源 / 报文展示名（HUD 标题），如 "中国地震预警网 地震预警"。 */
     val source: String,
     /** 数据源提供方，如 "Wolfx"。 */
     val sourceProvider: String = "",
@@ -36,8 +37,13 @@ data class EarthquakeEvent(
     /** 仅用于列表：与实时预警合并后标记该条仍在实时告警中。 */
     val isActive: Boolean = false,
 ) {
-    /** Stable across reports, but never conflates agencies or providers. */
-    val identity: String get() = "${sourceProvider.ifEmpty { source }}|${sourceAgency}|${eventId.ifEmpty { id }}"
+    /**
+     * 同一物理报文的跨聚合商合并键：**报数机构 + 频道化 eventId**，刻意不含 sourceProvider。
+     * Wolfx 与 Pancakes 会各自转发同一份上游报文，只有键不含聚合商，二者才会落进同一会话
+     * / 同一去重条目（互为备份、不重复告警）。eventId 必须带频道前缀（如 `jma_eew:`）以区分
+     * 共用上游 ID 的 EEW 与速报。
+     */
+    val identity: String get() = "${sourceAgency.ifEmpty { source }}|${eventId.ifEmpty { id }}"
     /** 来源标注 `<数据源提供方>·<报数机构>`（如 `Wolfx·CENC`）；无提供方时回退展示名。 */
     val sourceTag: String
         get() = when {

@@ -1,6 +1,7 @@
 package com.aloys23.komiraquake.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -18,9 +19,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -35,6 +38,7 @@ import com.aloys23.komiraquake.core.ClockInfo
 import com.aloys23.komiraquake.core.ClockState
 import com.aloys23.komiraquake.core.IntensityCalculator
 import com.aloys23.komiraquake.core.IntensityStandard
+import com.aloys23.komiraquake.core.WarningSpeech
 import com.aloys23.komiraquake.model.EarthquakeEvent
 import com.aloys23.komiraquake.model.WarningLevel
 import com.aloys23.komiraquake.ui.theme.AppFontFamily
@@ -164,22 +168,23 @@ fun QuakeHudCard(event: EarthquakeEvent, dark: Boolean, modifier: Modifier = Mod
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 LucideIcon(if (isActive) AppIcon.Radio else AppIcon.Activity, severity, modifier = Modifier.size(16.dp))
+                // 报文展示名（对齐 kanameishi 的 titleText），不再硬编码「活动预警」。
                 Label(when {
-                    event.isCanceled -> "预警已取消"
-                    isActive -> "活动预警 · 第 ${event.reportNum} 报"
-                    else -> "目录 / 所选事件 · 第 ${event.reportNum} 报"
+                    event.isCanceled -> "${event.source} · 取消报"
+                    isActive -> "${event.source} · 第 ${event.reportNum} 报"
+                    else -> event.source
                 }, severity, 12.sp, bold = true, maxLines = 1, modifier = Modifier.weight(1f))
             }
             Label(event.location, AppSurfaces.onSurface(dark), 19.sp, bold = true, maxLines = 2)
+            // 发震时刻独占一行，始终完整显示。
+            Label(quakeTimeText(event.timestamp) + "  UTC+8", AppSurfaces.outline(dark), 12.sp, maxLines = 1)
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Label(quakeTimeText(event.timestamp) + "  UTC+8", AppSurfaces.outline(dark), 12.sp, maxLines = 1,
-                    modifier = Modifier.weight(1f))
-                Label(event.sourceTag, AppSurfaces.outline(dark), 11.sp)
+                Label("M %.1f".format(event.magnitude) + " · 深度 %.0f km".format(event.depth),
+                    AppSurfaces.outline(dark), 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                // 数据源标注（提供方·机构）：次要信息，放在震级/深度行右侧。
+                Label(event.sourceTag, AppSurfaces.outline(dark), 11.sp, maxLines = 1)
             }
-            Label("M %.1f".format(event.magnitude) + " · 深度 %.0f km".format(event.depth) +
-                if (event.distanceKm >= 0) " · 距你 %.0f km".format(event.distanceKm) else " · 本地距离未知",
-                AppSurfaces.outline(dark), 12.sp, maxLines = 1)
         }
     }
 }
@@ -219,17 +224,15 @@ fun EarthquakeTile(event: EarthquakeEvent, dark: Boolean, onClick: () -> Unit, m
                     Label(event.location, AppSurfaces.onSurface(dark), 16.sp, bold = true, maxLines = 2,
                         modifier = Modifier.weight(1f))
                 }
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Label(quakeTimeText(event.timestamp) + "  UTC+8", AppSurfaces.outline(dark), 12.sp, maxLines = 1,
-                        modifier = Modifier.weight(1f))
-                    Label(event.sourceTag, AppSurfaces.outline(dark), 11.sp)
-                }
+                // 发震时刻独占一行，始终完整显示。
+                Label(quakeTimeText(event.timestamp) + "  UTC+8", AppSurfaces.outline(dark), 12.sp, maxLines = 1)
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Label("M %.1f".format(event.magnitude), AppSurfaces.onSurface(dark), 15.sp, bold = true)
-                    Label("深度 %.0f km".format(event.depth) + if (event.distanceKm >= 0) " · 距你 %.0f km".format(event.distanceKm) else " · 距离未知",
+                    Label("深度 %.0f km".format(event.depth),
                         AppSurfaces.outline(dark), 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                    // 数据源标注（提供方·机构）：次要信息，放在震级/深度行右侧。
+                    Label(event.sourceTag, AppSurfaces.outline(dark), 11.sp, maxLines = 1)
                 }
             }
         }
@@ -238,6 +241,72 @@ fun EarthquakeTile(event: EarthquakeEvent, dark: Boolean, onClick: () -> Unit, m
             AppButton(if (mapFocused) "取消显示" else "地图显示", dark, onToggleFocus,
                 icon = if (mapFocused) AppIcon.EyeOff else AppIcon.MapPin, primary = mapFocused)
         }
+    }
+}
+
+/**
+ * 全屏预警的无障碍播报。
+ *
+ * 预警原本只走视觉、声音、震动三条路，TalkBack 用户拿不到任何信息（震动感知不到、
+ * 媒体静音时音效也听不见）。这里用 assertive live region 在事件出现与倒计时关键档位
+ * 各播报一次：逐秒播报会淹没 TalkBack 队列，反而让人听不到最后那句。
+ *
+ * 文案只在变化时改写（见 [WarningSpeech.countdown] 的档位过滤），因此 TalkBack 只在
+ * 真正有新信息时才打断用户。
+ */
+@Composable
+private fun AnnounceWarningAccessibility(
+    event: EarthquakeEvent?, countdown: Int, standard: IntensityStandard,
+) {
+    // 零尺寸节点：不占版面、不接受焦点，只作为 live region 挂在语义树上。
+    Box(Modifier.size(0.dp).semantics {
+        liveRegion = LiveRegionMode.Assertive
+        contentDescription = WarningSpeech.summary(event, standard).orEmpty()
+    })
+    val milestone = WarningSpeech.countdown(countdown)
+    Box(Modifier.size(0.dp).semantics {
+        liveRegion = LiveRegionMode.Assertive
+        contentDescription = milestone.orEmpty()
+    })
+}
+
+/** 倒计时卡片的固定读法，供 TalkBack 聚焦时使用（与播报文案一致）。 */
+private fun countdownPhrase(countdown: Int): String = when {
+    countdown > 0 -> "距离地震波抵达还有 $countdown 秒"
+    countdown == 0 -> "地震波预计已抵达你所在区域"
+    else -> "本地到时未知，请立即避险"
+}
+
+/**
+ * 「预警尚未开启」引导卡。
+ *
+ * 预警总开关默认关闭——不擅自替用户打开安全功能。但新装用户若第一眼看不到这件事，
+ * 就会以为「装好了却在震时不响」。故在地图页顶部显著位置提示一次，可关闭且不重复打扰。
+ */
+@Composable
+fun WarningOnboardingCard(
+    dark: Boolean,
+    onEnable: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val accent = SeismicColors.severity(WarningLevel.WARNING, dark)
+    Column(modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
+        .background(AppSurfaces.surfaceContainer(dark))
+        .border(1.dp, accent.copy(alpha = 0.55f), RoundedCornerShape(20.dp))
+        .padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            LucideIcon(AppIcon.BellOff, accent)
+            Label("地震预警尚未开启", AppSurfaces.onSurface(dark), 16.sp, bold = true,
+                modifier = Modifier.weight(1f)
+                    .semantics { heading() })
+            AppIconButton(AppIcon.Close, "关闭提示", dark, onDismiss)
+        }
+        Label(
+            "当前只展示地震事件，不会发出声音、震动或全屏预警。开启后才会按本地烈度提醒。",
+            AppSurfaces.outline(dark), 13.sp,
+        )
+        AppButton("开启地震预警", dark, onEnable, Modifier.fillMaxWidth(), AppIcon.Bell, primary = true)
     }
 }
 
@@ -250,6 +319,7 @@ fun WarningOverlay(event: EarthquakeEvent?, countdown: Int, onDismiss: () -> Uni
     val severity = SeismicColors.severity(event?.warningLevel ?: WarningLevel.WARNING, dark)
     val foreground = AppSurfaces.onSurface(dark)
     val secondary = AppSurfaces.outline(dark)
+    AnnounceWarningAccessibility(event, countdown, standard)
     Box(modifier.fillMaxSize().background(AppSurfaces.surface(dark)).safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
         Column(Modifier.widthIn(max = 640.dp).fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)) {
@@ -262,7 +332,9 @@ fun WarningOverlay(event: EarthquakeEvent?, countdown: Int, onDismiss: () -> Uni
                 }
                 AppIconButton(AppIcon.ChevronDown, "收起全屏，保留提醒", dark, onDismiss)
             }
-            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(severity).padding(20.dp),
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(severity).padding(20.dp)
+                // 焦点落到该卡片时读出完整倒计时句，而不是逐个数字碎片。
+                .semantics { contentDescription = countdownPhrase(countdown) },
                 horizontalAlignment = Alignment.CenterHorizontally) {
                 val ink = SeismicColors.on(severity)
                 when {

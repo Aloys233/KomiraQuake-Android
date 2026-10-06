@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  仅 debug 构建生效（位于 src/debug）。release 不引用本文件，故仍禁止明文，
+  release 下测试模拟源需自签 wss://。
+
+  模拟源（Simulated/）默认监听 0.0.0.0，启动横幅直接打印本机局域网 IP 并提示
+  「手机填这个」，所以放行范围必须覆盖真实 LAN 地址，否则按横幅操作必然连不上。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">localhost</domain>
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <!-- 安卓模拟器访问宿主机 -->
+        <domain includeSubdomains="false">10.0.2.2</domain>
+    </domain-config>
+</network-security-config>

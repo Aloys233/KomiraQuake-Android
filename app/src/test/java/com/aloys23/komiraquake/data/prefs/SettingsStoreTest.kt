@@ -2,10 +2,44 @@ package com.aloys23.komiraquake.data.prefs
 
 import android.content.SharedPreferences
 import com.aloys23.komiraquake.core.IntensityStandard
+import com.aloys23.komiraquake.model.SourceIds
 import org.junit.Assert.*
 import org.junit.Test
 
 class SettingsStoreTest {
+    /** 需要鉴权的源默认关闭，未填凭据前不建立连接。 */
+    @Test fun credentialSourcesAreOffByDefault() {
+        val store = SettingsStore(MemoryPreferences())
+        assertFalse(store.current.enabled(SourceIds.JIAN))
+        assertFalse(store.current.enabled(SourceIds.WHEWS))
+        assertTrue(store.current.enabled(SourceIds.WOLFX))
+        assertTrue(store.current.enabled(SourceIds.PANCAKES))
+        assertEquals("", store.current.jianRefreshToken)
+        assertEquals("", store.current.whewsToken)
+        // 旧版「启用集合」迁移后仍叠加默认关闭的鉴权源。
+        val legacy = MemoryPreferences()
+        legacy.edit().putStringSet("enabledSources", setOf(SourceIds.WOLFX)).apply()
+        val migrated = SettingsStore(legacy).current
+        assertTrue(migrated.enabled(SourceIds.WOLFX))
+        assertFalse(migrated.enabled(SourceIds.PANCAKES))
+        assertFalse(migrated.enabled(SourceIds.JIAN))
+        assertFalse(migrated.enabled(SourceIds.WHEWS))
+    }
+
+    /** Whews 令牌可持久化。 */
+    @Test fun whewsTokenIsPersisted() {
+        val store = SettingsStore(MemoryPreferences())
+        store.update { it.copy(whewsToken = "wat_x") }
+        assertEquals("wat_x", store.current.whewsToken)
+        assertTrue(store.current.enabled(SourceIds.JIAN).not())
+        // 写入令牌不影响其它源的启用状态。
+        assertTrue(store.current.enabled(SourceIds.WOLFX))
+    }
+
+    /** 新增源不得加入旧版迁移白名单：否则升级用户会被误判为「已禁用过」。 */
+    @Test fun whewsIsNotInLegacyMigrationAllowlist() {
+        assertFalse(SourceIds.WHEWS in SourceIds.ALL)
+    }
     @Test fun blurDefaultsOnAndMotionDefaultsOff() {
         val store = SettingsStore(MemoryPreferences())
         assertTrue(Settings().backgroundBlur)
@@ -70,13 +104,103 @@ class SettingsStoreTest {
     @Test fun appearanceUpdatesPreserveWarningSourceAndMapPreferences() {
         val prefs = MemoryPreferences()
         val store = SettingsStore(prefs)
-        store.update { it.copy(basemapId = "osm", enabledSources = setOf("wolfx"), intensityStandard = IntensityStandard.JMA,
+        store.update { it.copy(basemapId = "osm", disabledSources = setOf("pancakes"), intensityStandard = IntensityStandard.JMA,
             localIntensityFilter = 5.0, enableWarnings = true, isMuted = true) }
         val before = store.current
         store.update { it.copy(themeMode = ThemeMode.LIGHT, backgroundBlur = false, reduceMotion = true) }
         val expected = before.copy(themeMode = ThemeMode.LIGHT, backgroundBlur = false, reduceMotion = true)
         assertEquals(expected, store.state.value)
         assertEquals(expected, SettingsStore(prefs).current)
+    }
+
+    @Test fun resetToDefaultsRestoresEveryFieldAndPersists() {
+        val prefs = MemoryPreferences()
+        val store = SettingsStore(prefs)
+        store.update {
+            it.copy(themeMode = ThemeMode.DARK, backgroundBlur = false, reduceMotion = true,
+                basemapId = "osm", enableWarnings = true, localIntensityFilter = 4.5,
+                alertVolume = 0.3, disabledSources = setOf("wolfx", "jian"))
+        }
+        store.resetToDefaults()
+        assertEquals(Settings(), store.state.value)
+        // 清空后重新读取也必须是默认值，而不是内存里的旧快照。
+        assertEquals(Settings(), SettingsStore(prefs).current)
+    }
+
+    @Test fun resetToDefaultsDropsPersistedTokens() {
+        val prefs = MemoryPreferences()
+        val store = SettingsStore(prefs)
+        store.update { it.copy(jianRefreshToken = "rt_secret") }
+        assertTrue(SettingsStore(prefs).current.jianRefreshToken.isNotEmpty())
+        store.resetToDefaults()
+        assertEquals("", SettingsStore(prefs).current.jianRefreshToken)
+    }
+
+    /**
+     * 开发者模式与模拟源地址必须经 persist→load 往返存活。
+     * 漏写 `persist()` 是本文件最隐蔽的坑：内存里看着对，重启即丢。
+     */
+    @Test fun developerModeAndSimulatedUrlSurvivePersistReload() {
+        val prefs = MemoryPreferences()
+        val store = SettingsStore(prefs)
+        // 默认值：开发者模式关、地址空（不预填，使「开了但没配」仍是未配置）。
+        assertFalse(store.current.developerMode)
+        assertEquals("", store.current.simulatedUrl)
+
+        store.update { it.copy(developerMode = true, simulatedUrl = "ws://10.0.2.2:8080/ws") }
+        val reloaded = SettingsStore(prefs).current
+        assertTrue("开发者模式应已持久化", reloaded.developerMode)
+        assertEquals("ws://10.0.2.2:8080/ws", reloaded.simulatedUrl)
+
+        // 模拟源刻意不进默认禁用集：门控交给 isConfigured，否则形成三重门。
+        assertFalse(SourceIds.SIMULATED in defaultDisabledSources())
+        assertTrue(SettingsStore(prefs).current.enabled(SourceIds.SIMULATED))
+    }
+
+    /** 恢复默认必须一并清掉开发者模式与地址，否则源会在下次启动时静默连上。 */
+    @Test fun resetToDefaultsClearsDeveloperSettings() {
+        val prefs = MemoryPreferences()
+        val store = SettingsStore(prefs)
+        store.update { it.copy(developerMode = true, simulatedUrl = "ws://10.0.2.2:8080/ws") }
+        store.resetToDefaults()
+        assertFalse(SettingsStore(prefs).current.developerMode)
+        assertEquals("", SettingsStore(prefs).current.simulatedUrl)
+    }
+
+    /** 新增源不得进旧版迁移白名单，否则升级用户会被当成「已禁用」。 */
+    @Test fun simulatedSourceIsNotInLegacyMigrationAllowlist() {
+        assertFalse(SourceIds.SIMULATED in SourceIds.ALL)
+    }
+
+    /**
+     * 预警默认关闭（不擅自替用户打开安全功能），引导卡的关闭状态必须持久化，
+     * 否则每次启动都弹一次就成了骚扰。
+     */
+    @Test fun warningsStayOffByDefaultAndOnboardingDismissalPersists() {
+        val prefs = MemoryPreferences()
+        val store = SettingsStore(prefs)
+        assertFalse("预警默认应为关闭", store.current.enableWarnings)
+        assertFalse("引导卡默认应显示", store.current.warningOnboardingDismissed)
+
+        store.update { it.copy(warningOnboardingDismissed = true) }
+        val reloaded = SettingsStore(prefs).current
+        assertTrue("关闭引导的状态应已持久化", reloaded.warningOnboardingDismissed)
+        assertFalse("关闭引导不得顺带打开预警", reloaded.enableWarnings)
+
+        // 开启预警后引导不再出现，但关闭标记保留，用户手动改回时无需重看。
+        store.update { it.copy(enableWarnings = true) }
+        assertTrue(SettingsStore(prefs).current.enableWarnings)
+        assertTrue(SettingsStore(prefs).current.warningOnboardingDismissed)
+    }
+
+    /** 恢复默认应把引导卡重新带回未关闭状态。 */
+    @Test fun resetToDefaultsRestoresOnboardingPrompt() {
+        val prefs = MemoryPreferences()
+        val store = SettingsStore(prefs)
+        store.update { it.copy(enableWarnings = true, warningOnboardingDismissed = true) }
+        store.resetToDefaults()
+        assertFalse(store.current.enableWarnings)
+        assertFalse(store.current.warningOnboardingDismissed)
     }
 }
 

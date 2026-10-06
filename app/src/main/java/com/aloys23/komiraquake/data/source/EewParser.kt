@@ -78,6 +78,8 @@ object EewParser {
         sourceTitle: String,
         idPrefix: String,
         now: Long = AppClock.now(),
+        originTimeIsJst: Boolean = false,
+        eventNamespace: String = "",
     ): EarthquakeEvent? {
         if (obj.optBoolean("isTraining", false)) return null
 
@@ -104,13 +106,18 @@ object EewParser {
         val originTime = firstString(
             obj,
             listOf("OriginTime", "originTime", "shockTime", "time"),
-        )?.let { parseTime(it) } ?: now
+        )?.let { if (originTimeIsJst) parseJstTime(it) else parseTime(it) } ?: now
 
         val (maxText, maxRaw) = parseMaxIntensity(obj, standard)
+        // 频道化 eventId：跨聚合商对齐合并键（见 EarthquakeEvent.identity）。
+        val eventId = if (eventNamespace.isEmpty()) rawId else "$eventNamespace:$rawId"
         return build(
-            id, rawId, magnitude, latitude, longitude, depth, location, originTime,
+            id, eventId, magnitude, latitude, longitude, depth, location, originTime,
             sourceTitle, user, standard, maxText, maxRaw, reportNum, isFinal, isCanceled,
-        ).copy(sourceUpdatedAt = firstString(obj, listOf("ReportTime", "reportTime", "UpdateTime", "updateTime"))?.let(::parseTime))
+        ).copy(
+            sourceUpdatedAt = firstString(obj, listOf("ReportTime", "reportTime", "UpdateTime", "updateTime"))
+                ?.let { if (originTimeIsJst) parseJstTime(it) else parseTime(it) },
+        )
     }
 
     /** CENC 目录条目的合成事件（永不产生 warning/critical）。 */
@@ -127,8 +134,7 @@ object EewParser {
         val location = firstString(obj, listOf("location", "placeName"))?.takeIf { it.isNotBlank() }
             ?: UNKNOWN_LOCATION
         val origin = firstString(obj, listOf("time", "originTime"))?.let { parseTime(it) } ?: now
-        val reviewed = firstString(obj, listOf("type")) == "reviewed"
-        val sourceTitle = if (reviewed) "CENC 正式测定" else "CENC 自动测定"
+        val sourceTitle = "中国地震台网 地震信息"
         // 优先用数据源自带的 EventID（跨报次稳定，且可与 WS 预警链路对齐）
         val rawEventId = firstString(obj, listOf("EventID", "id")) ?: ""
         val id = if (rawEventId.isEmpty()) {
@@ -151,6 +157,64 @@ object EewParser {
                 level
             },
         )
+    }
+
+    /** Wolfx jma_eqlist（JMA 地震情报）条目 → 目录事件。
+     *  字段：EventID / time_full / location / magnitude / shindo / depth("10km") / latitude / longitude。 */
+    fun parseJmaDirectory(
+        obj: JSONObject,
+        user: Pair<Double, Double>?,
+        standard: IntensityStandard,
+    ): EarthquakeEvent? {
+        val latitude = firstDouble(obj, listOf("latitude", "Latitude")) ?: return null
+        val longitude = firstDouble(obj, listOf("longitude", "Longitude")) ?: return null
+        val magnitude = firstDouble(obj, listOf("magnitude", "Magnitude")) ?: 0.0
+        val depth = parseDepthKm(firstString(obj, listOf("depth", "Depth"))) ?: DEFAULT_DEPTH
+        val location = firstString(obj, listOf("location", "placeName"))?.takeIf { it.isNotBlank() }
+            ?: UNKNOWN_LOCATION
+        // time_full 含秒，time 只到分钟；两者都是 JST 墙钟。解析失败则丢弃，不退回 now。
+        val timeRaw = firstString(obj, listOf("time_full", "time")) ?: return null
+        val origin = parseJstTime(timeRaw) ?: return null
+        val rawEventId = firstString(obj, listOf("EventID", "id"))
+        val id = if (rawEventId.isNullOrEmpty()) {
+            "wolfx_jmaeqlist_${origin}_${"%.2f".format(Locale.US, latitude)}"
+        } else {
+            "wolfx_jmaeqlist_$rawEventId"
+        }
+        // 与 Pancakes 的 jma_eqlist 共用事件命名空间，源内去重/合并口径一致。
+        val eventId = if (rawEventId.isNullOrEmpty()) "jma_eqlist:$origin" else "jma_eqlist:$rawEventId"
+        val (shindoText, shindoRaw) = parseShindo(firstString(obj, listOf("shindo", "Shindo")))
+        val event = build(
+            id, eventId, magnitude, latitude, longitude, depth, location, origin,
+            "JMA 地震情报", user, standard, shindoText, shindoRaw,
+            reportNum = 1, isFinal = true, isCanceled = false,
+        )
+        // 目录永不产生 warning/critical：若有则降级为 watch。
+        val level = event.warningLevel
+        return event.copy(
+            warningLevel = if (level == WarningLevel.WARNING || level == WarningLevel.CRITICAL) {
+                WarningLevel.WATCH
+            } else {
+                level
+            },
+        )
+    }
+
+    /** "10km" → 10.0（去掉单位后缀）。 */
+    private fun parseDepthKm(raw: String?): Double? {
+        val s = raw?.trim() ?: return null
+        if (s.isEmpty()) return null
+        val end = s.indexOfFirst { !(it.isDigit() || it == '.' || it == '-') }
+        val numeric = if (end < 0) s else s.substring(0, end)
+        return numeric.toDoubleOrNull()
+    }
+
+    /** JMA 震度文本（"1"/"5-"/"5+"/"7"）→ (展示文本, 原始数值)。JMA 源固定按 JMA 展示，不随用户标准转换。 */
+    private fun parseShindo(raw: String?): Pair<String, Double> {
+        val s = raw?.trim() ?: return "" to 0.0
+        if (s.isEmpty() || s == "null" || s == "-") return "" to 0.0
+        val d = s.toDoubleOrNull()
+        return s to (if (d != null) d else (JMA_TEXT_RAW[s] ?: 0.0))
     }
 
     /** Recompute local values without passing through network deduplication. */
@@ -322,6 +386,46 @@ object EewParser {
                 fmt.isLenient = false
                 val d: Date = fmt.parse(trimmed) ?: continue
                 return d.time
+            } catch (_: Exception) {
+                // 尝试下一个格式
+            }
+        }
+        return null
+    }
+
+    private val jstTimeFormats = listOf(
+        "yyyy/MM/dd HH:mm:ss",
+        "yyyy/MM/dd HH:mm",
+        "yyyy-MM-dd HH:mm:ss",
+        "yyyy-MM-dd HH:mm",
+    )
+
+    /**
+     * 解析无时区的中国标准时间（UTC+8）墙钟，如 Whews 的 cenc / cea / usgs 等端点。
+     * "2026-08-13 08:47:00" → 00:47:00Z。与 [parseTime] 的区别仅在时区假设：
+     * parseTime 按系统本地时区解释，设备不在 UTC+8 时会把墙钟整体偏移。
+     */
+    fun parseUtc8Time(raw: String): Long? = parseFixedOffsetTime(raw, 8)
+
+    /** 解析无时区的日本标准时间（JST, UTC+9）墙钟，如 Wolfx 的 jma_eqlist / jma_eew。
+     * "2026/10/06 13:47:00" → 04:47:00Z。与 [parseTime] 的区别仅在时区假设：
+     * parseTime 按系统本地时区解释，在 UTC+8 机器上会把 JST 墙钟整体晚算 1 小时。
+     */
+    fun parseJstTime(raw: String): Long? = parseFixedOffsetTime(raw, 9)
+
+    /**
+     * 把无时区墙钟按固定偏移解释为 epoch 毫秒。带时区/纯数字的输入交给 [parseTime]
+     * 处理（本身语义明确，无需再套偏移）。
+     */
+    private fun parseFixedOffsetTime(raw: String, offsetHours: Int): Long? {
+        val trimmed = raw.trim()
+        if (trimmed.isEmpty()) return null
+        if (trimmed.all { it.isDigit() }) return parseTime(trimmed)
+        for (pattern in jstTimeFormats) {
+            try {
+                val fmt = java.time.format.DateTimeFormatter.ofPattern(pattern, Locale.US)
+                val ldt = java.time.LocalDateTime.parse(trimmed, fmt)
+                return ldt.toInstant(java.time.ZoneOffset.ofHours(offsetHours)).toEpochMilli()
             } catch (_: Exception) {
                 // 尝试下一个格式
             }

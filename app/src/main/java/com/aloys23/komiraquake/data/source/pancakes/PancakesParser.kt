@@ -2,13 +2,11 @@ package com.aloys23.komiraquake.data.source.pancakes
 
 import com.aloys23.komiraquake.core.IntensityStandard
 import com.aloys23.komiraquake.data.source.EewParser
+import com.aloys23.komiraquake.data.source.SourceEventKind
 import com.aloys23.komiraquake.model.EarthquakeEvent
 import org.json.JSONObject
 
-/** 实时预警（进入告警生命周期）还是目录条目（只进列表/历史）。 */
-enum class PancakesKind { LIVE, DIRECTORY }
-
-data class PancakesParsed(val event: EarthquakeEvent, val kind: PancakesKind, val source: String)
+data class PancakesParsed(val event: EarthquakeEvent, val kind: SourceEventKind, val source: String)
 
 /**
  * PancakesAPI 地震事件解析。
@@ -81,7 +79,7 @@ object PancakesParser {
             sourceUpdatedAt = updated,
             user = user,
             standard = standard,
-            kind = PancakesKind.DIRECTORY,
+            kind = SourceEventKind.DIRECTORY,
         ).event
     }
 
@@ -115,7 +113,7 @@ object PancakesParser {
                 sourceUpdatedAt = envelopeTime,
                 user = user,
                 standard = standard,
-                kind = PancakesKind.LIVE,
+                kind = SourceEventKind.LIVE,
             )
         }
         val latitude = firstDouble(payload, "latitude") ?: return null
@@ -144,7 +142,7 @@ object PancakesParser {
             sourceUpdatedAt = firstLong(payload, "lastUpdateMs"),
             user = user,
             standard = standard,
-            kind = PancakesKind.LIVE,
+            kind = SourceEventKind.LIVE,
         )
     }
 
@@ -185,7 +183,7 @@ object PancakesParser {
             sourceUpdatedAt = firstLong(payload, "updatedTimeMs"),
             user = user,
             standard = standard,
-            kind = PancakesKind.LIVE,
+            kind = SourceEventKind.LIVE,
         )
     }
 
@@ -224,7 +222,7 @@ object PancakesParser {
             sourceUpdatedAt = EewParser.parseTime(firstString(payload, "AnnouncedTime") ?: ""),
             user = user,
             standard = standard,
-            kind = PancakesKind.LIVE,
+            kind = SourceEventKind.LIVE,
         )
     }
 
@@ -268,7 +266,7 @@ object PancakesParser {
             sourceUpdatedAt = reportTime,
             user = user,
             standard = standard,
-            kind = PancakesKind.DIRECTORY,
+            kind = SourceEventKind.DIRECTORY,
         )
     }
 
@@ -292,7 +290,7 @@ object PancakesParser {
         sourceUpdatedAt: Long?,
         user: Pair<Double, Double>?,
         standard: IntensityStandard,
-        kind: PancakesKind,
+        kind: SourceEventKind,
     ): PancakesParsed {
         val event = EarthquakeEvent(
             id = prefix + rawEventId,
@@ -316,7 +314,7 @@ object PancakesParser {
             isCanceled = isCanceled,
             sourceUpdatedAt = sourceUpdatedAt,
         )
-        val recomputed = EewParser.recalculate(event, user, standard, kind == PancakesKind.DIRECTORY)
+        val recomputed = EewParser.recalculate(event, user, standard, kind == SourceEventKind.DIRECTORY)
         return PancakesParsed(recomputed, kind, source)
     }
 

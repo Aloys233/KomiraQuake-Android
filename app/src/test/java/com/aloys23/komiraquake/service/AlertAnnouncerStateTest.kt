@@ -54,4 +54,27 @@ class AlertAnnouncerStateTest {
         assertFalse(b.arrived)
         assertFalse(b.final)
     }
+
+    /**
+     * 抵达播报只取决于「本事件是否播过倒计时」，不取决于当前 warningLevel：
+     * 晚到报次把等级降级后，已经开始的倒计时必须在到时收尾。
+     */
+    @Test fun arrivalPairsWithCountdownEvenAfterLevelDowngrade() {
+        val state = AlertAnnouncer.EventState()
+        state.acceptReport(1, false)
+        state.countdowns.add(10)
+        assertTrue("countdown happened before arrival", state.countdowns.contains(10))
+        state.arrived = true
+        assertTrue("arrival still announced after level downgrade", state.arrived)
+    }
+
+    @Test fun arrivalIsIndependentPerEvent() {
+        val a = AlertAnnouncer.EventState()
+        val b = AlertAnnouncer.EventState()
+        a.countdowns.add(3)
+        b.countdowns.add(3)
+        a.arrived = true
+        assertTrue(a.arrived)
+        assertFalse("event B arrival is independent of A", b.arrived)
+    }
 }

@@ -14,8 +14,10 @@ android {
         applicationId = "com.aloys23.komiraquake"
         minSdk = 33
         targetSdk = 37
-        versionCode = 4
-        versionName = "1.0.3"
+        // 缺省值供本地开发；CI 推 tag 时用 -PversionName/-PversionCode 覆盖，
+        // 使产物内的版本与 tag 一致（否则发 v1.0.4 仍会打出 versionName=1.0.3）。
+        versionCode = (providers.gradleProperty("versionCode").orNull ?: "4").toInt()
+        versionName = providers.gradleProperty("versionName").orNull ?: "1.0.3"
         testInstrumentationRunner = "com.aloys23.komiraquake.IsolatedTestRunner"
     }
 

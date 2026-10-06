@@ -55,6 +55,8 @@ fun QuakeApp(container: AppContainer) {
     val sourceInfos by container.repository.sourceInfos.collectAsStateWithLifecycle()
     val clockInfo by container.clockInfo.collectAsStateWithLifecycle()
     val selectedEvent = mapFocus ?: activeWarning ?: history.firstOrNull()
+    // 波前走完后收起左上角 HUD；新的波前或切换到其它事件时恢复。
+    var wavesDoneId by remember { mutableStateOf<String?>(null) }
     val tileLoader = remember { TileLoader(container.tileClient) }
     var section by remember { mutableIntStateOf(0) }
     val density = LocalDensity.current
@@ -81,7 +83,10 @@ fun QuakeApp(container: AppContainer) {
                                     focusEvent = selectedEvent, cameraRequest = cameraRequest,
                                     // 只有活跃预警或用户显式焦点才画波前圆；history 回退的最近事件只画 X。
                                     waveEligible = mapFocus != null || activeWarning != null,
+                                    warningActive = activeWarning != null,
                                     topOcclusion = topOcclusion, modifier = Modifier.fillMaxSize(),
+                                    onWavesStarted = { wavesDoneId = null },
+                                    onWavesFinished = { wavesDoneId = selectedEvent?.identity },
                                 )
                                 // One measured, scrollable stack: no fixed offsets that collide at large font scales.
                                 Column(Modifier.align(Alignment.TopStart).padding(12.dp).widthIn(max = 420.dp).fillMaxWidth()
@@ -91,7 +96,20 @@ fun QuakeApp(container: AppContainer) {
                                     MapStatusBar(statusText(sourceInfo.status), statusLevel(sourceInfo.status),
                                         if (location.hasLocation) location.name else "定位未知", dark,
                                         onOpenList = { section = 1 }, onOpenSettings = { section = 2 })
-                                    val hud = selectedEvent
+                                    // 预警默认关闭，但必须让新装用户第一眼就看到这件事，
+                                    // 否则「装了却不报警」会被当成故障。
+                                    if (!settings.enableWarnings && !settings.warningOnboardingDismissed) {
+                                        WarningOnboardingCard(
+                                            dark = dark,
+                                            onEnable = {
+                                                container.settings.update { it.copy(enableWarnings = true) }
+                                            },
+                                            onDismiss = {
+                                                container.settings.update { it.copy(warningOnboardingDismissed = true) }
+                                            },
+                                        )
+                                    }
+                                    val hud = selectedEvent?.takeIf { it.identity != wavesDoneId }
                                     if (hud == null) {
                                         Row(Modifier.fillMaxWidth().mapGlass(dark).padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                             LucideIcon(AppIcon.Info, AppSurfaces.outline(dark))
@@ -133,8 +151,16 @@ fun QuakeApp(container: AppContainer) {
                             onUpdate = { container.settings.update(it) },
                             onRequestLocation = { container.location.requestCurrentPosition() },
                             onSetManualLocation = { lat, lon -> container.location.setManual(lat, lon) },
-                            onSampleSpeech = { container.speech.speakSample() },
-                            onRefreshClock = { container.ntp.refresh() })
+                            onRefreshClock = { container.ntp.refresh() },
+                            onLoginJian = { key -> container.repository.loginJian(key) },
+                            onSaveWhewsToken = { token ->
+                                container.settings.update { it.copy(whewsToken = token) }
+                            },
+                            onSaveSimulatedUrl = { url ->
+                                container.settings.update { it.copy(simulatedUrl = url) }
+                            },
+                            onResetDefaults = { container.settings.resetToDefaults() },
+                            onExit = { section = 0 })
                     }
                 }
                 AppNavigation(section, dark) { section = it }

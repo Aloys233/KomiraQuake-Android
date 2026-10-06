@@ -2,7 +2,12 @@ package com.aloys23.komiraquake.data.source.wolfx
 
 import com.aloys23.komiraquake.core.AppClock
 import com.aloys23.komiraquake.core.IntensityStandard
+import com.aloys23.komiraquake.core.NetworkGate
+import com.aloys23.komiraquake.data.source.EarthquakeSource
 import com.aloys23.komiraquake.data.source.EewParser
+import com.aloys23.komiraquake.data.source.SourceEvent
+import com.aloys23.komiraquake.data.source.SourceEventKind
+import com.aloys23.komiraquake.data.source.awaitReconnectDelay
 import com.aloys23.komiraquake.model.ConnectionStatus
 import com.aloys23.komiraquake.model.DataSourceInfo
 import com.aloys23.komiraquake.model.EarthquakeEvent
@@ -29,11 +34,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-enum class WolfxEventKind { EEW, DIRECTORY }
-
-/** Consumers must call [WolfxSource.isCurrent] before applying buffered events. */
-data class WolfxEvent(val event: EarthquakeEvent, val kind: WolfxEventKind, val generation: Long = 0)
-
 /** Independently monitored WebSocket warnings and HTTP catalog, fenced by start/stop session. */
 class WolfxSource(
     private val scope: CoroutineScope,
@@ -42,15 +42,18 @@ class WolfxSource(
     private val standardProvider: () -> IntensityStandard,
     socketFactory: WebSocket.Factory? = null,
     private val callFactory: Call.Factory = okHttp,
-) {
+    /** 网络感知重连；默认恒在线，退化为固定退避。 */
+    private val networkGate: NetworkGate = NetworkGate.AlwaysOnline,
+) : EarthquakeSource {
+    override val id: String get() = SourceIds.WOLFX
     private val lock = Any()
-    private val _events = MutableSharedFlow<WolfxEvent>(extraBufferCapacity = 128)
-    val events: SharedFlow<WolfxEvent> = _events.asSharedFlow()
+    private val _events = MutableSharedFlow<SourceEvent>(extraBufferCapacity = 128)
+    override val events: SharedFlow<SourceEvent> = _events.asSharedFlow()
     private val _status = MutableStateFlow(DataSourceInfo(
         id = SourceIds.WOLFX, name = "Wolfx", region = "全球",
         description = "Wolfx all_eew 聚合（CENC/SC/JMA/CWA/FJ/CQ）",
     ))
-    val status: StateFlow<DataSourceInfo> = _status.asStateFlow()
+    override val status: StateFlow<DataSourceInfo> = _status.asStateFlow()
     private val sockets = socketFactory ?: okHttp.newBuilder()
         .readTimeout(0, TimeUnit.MILLISECONDS).pingInterval(20, TimeUnit.SECONDS).build()
     private var running = false
@@ -64,24 +67,26 @@ class WolfxSource(
     private var pollJob: Job? = null
     private var reconnectJob: Job? = null
 
-    fun isCurrent(event: WolfxEvent): Boolean = synchronized(lock) { current(event.generation) }
+    override fun isCurrent(event: SourceEvent): Boolean = synchronized(lock) { current(event.generation) }
     private fun current(session: Long) = running && generation == session
     private fun current(session: Long, socketAttempt: Long) = current(session) && attempt == socketAttempt
 
-    fun start() = synchronized(lock) {
+    override fun start() = synchronized(lock) {
         if (running) return@synchronized
         running = true
         val session = ++generation
         connect(session)
         pollJob = scope.launch(Dispatchers.IO) {
             while (isActive) {
+                // 断网时不发注定失败的目录请求，等恢复后由 awaitOnline 立刻唤醒。
+                if (networkGate.awaitOnline()) retryCount = 0
                 pollDirectory(session)
                 delay(WolfxProtocol.POLL_INTERVAL_MS)
             }
         }
     }
 
-    fun stop() = synchronized(lock) {
+    override fun stop() = synchronized(lock) {
         running = false
         generation++
         attempt++
@@ -100,7 +105,7 @@ class WolfxSource(
     }
 
     /** Derived local values are recalculated by the repository, never by starting networking. */
-    fun onLocationChanged() = Unit
+    override fun onLocationChanged() = Unit
 
     private fun connect(session: Long) {
         if (!current(session)) return
@@ -122,12 +127,17 @@ class WolfxSource(
         val delayMs = (3 + retryCount++).coerceIn(3, 15) * 1000L
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
-            delay(delayMs)
-            synchronized(lock) { if (current(session)) connect(session) }
+            val resumed = awaitReconnectDelay(networkGate, delayMs)
+            synchronized(lock) {
+                if (!current(session)) return@synchronized
+                // 断网期间的失败不归咎于站点：退避与站点索引一并复位回首选。
+                if (resumed) { retryCount = 0; urlIndex = 0 }
+                connect(session)
+            }
         }
     }
 
-    fun refreshDirectory() = synchronized(lock) {
+    override fun refreshDirectory() = synchronized(lock) {
         if (!running) return@synchronized
         val session = generation
         scope.launch(Dispatchers.IO) { pollDirectory(session) }
@@ -135,48 +145,66 @@ class WolfxSource(
     }
 
     private fun pollDirectory(session: Long) {
-        val call = synchronized(lock) {
+        synchronized(lock) {
             if (!current(session) || directoryCall != null) return
-            callFactory.newCall(Request.Builder().url(WolfxProtocol.EQ_LIST_URL).build()).also {
-                directoryCall = it
-                _status.value = _status.value.copy(directoryStatus = ConnectionStatus.CONNECTING, directoryError = null)
-            }
+            _status.value = _status.value.copy(directoryStatus = ConnectionStatus.CONNECTING, directoryError = null)
         }
         val started = AppClock.elapsedMs()
-        try {
-            call.execute().use { response ->
-                check(response.isSuccessful) { "HTTP ${response.code}" }
-                val body = checkNotNull(response.body?.string()) { "Empty response" }
-                val root = JSONObject(body)
-                synchronized(lock) {
-                    if (!current(session)) return
-                    val loc = locationProvider()
-                    val standard = standardProvider()
-                    for (key in root.keys()) {
-                        if (!key.startsWith("No")) continue
-                        val item = root.optJSONObject(key) ?: continue
-                        val parsed = EewParser.parseCencDirectory(item, loc, standard) ?: continue
-                        _events.tryEmit(WolfxEvent(parsed.copy(
-                            sourceProvider = WolfxProtocol.PROVIDER,
-                            sourceAgency = WolfxProtocol.DIRECTORY_AGENCY,
-                        ), WolfxEventKind.DIRECTORY, session))
-                    }
-                    _status.value = _status.value.copy(
-                        directoryStatus = ConnectionStatus.CONNECTED,
-                        directoryLatencyMs = AppClock.elapsedMs() - started,
-                        directoryLastSuccessAt = AppClock.now(), directoryError = null,
-                    )
-                }
+        var failure: String? = null
+        // 一个轮询周期顺序拉取全部目录端点；全部成功才算目录健康。
+        for ((url, agency) in DIRECTORY_ENDPOINTS) {
+            val call = synchronized(lock) {
+                if (!current(session)) return
+                callFactory.newCall(Request.Builder().url(url).build()).also { directoryCall = it }
             }
-        } catch (error: Exception) {
-            synchronized(lock) {
-                if (current(session)) _status.value = _status.value.copy(
-                    directoryStatus = ConnectionStatus.ERROR, directoryError = error.message ?: "Directory request failed",
+            try {
+                call.execute().use { response ->
+                    check(response.isSuccessful) { "HTTP ${response.code}" }
+                    val body = checkNotNull(response.body?.string()) { "Empty response" }
+                    val root = JSONObject(body)
+                    synchronized(lock) {
+                        if (!current(session)) return
+                        val loc = locationProvider()
+                        val standard = standardProvider()
+                        for (key in root.keys()) {
+                            if (!key.startsWith("No")) continue
+                            val item = root.optJSONObject(key) ?: continue
+                            val parsed = parseDirectoryItem(url, item, loc, standard) ?: continue
+                            _events.tryEmit(SourceEvent(parsed.copy(
+                                sourceProvider = WolfxProtocol.PROVIDER,
+                                sourceAgency = agency,
+                            ), SourceEventKind.DIRECTORY, session))
+                        }
+                    }
+                }
+            } catch (error: Exception) {
+                if (failure == null) failure = "$url: ${error.message ?: "directory request failed"}"
+            } finally {
+                synchronized(lock) { if (directoryCall === call) directoryCall = null }
+            }
+            if (!current(session)) return
+        }
+        synchronized(lock) {
+            if (!current(session)) return
+            if (failure == null) {
+                _status.value = _status.value.copy(
+                    directoryStatus = ConnectionStatus.CONNECTED,
+                    directoryLatencyMs = AppClock.elapsedMs() - started,
+                    directoryLastSuccessAt = AppClock.now(), directoryError = null,
+                )
+            } else {
+                _status.value = _status.value.copy(
+                    directoryStatus = ConnectionStatus.ERROR, directoryError = failure,
                 )
             }
-        } finally {
-            synchronized(lock) { if (directoryCall === call) directoryCall = null }
         }
+    }
+
+    private fun parseDirectoryItem(
+        url: String, item: JSONObject, loc: Pair<Double, Double>?, standard: IntensityStandard,
+    ): EarthquakeEvent? = when (url) {
+        WolfxProtocol.JMA_EQ_LIST_URL -> EewParser.parseJmaDirectory(item, loc, standard)
+        else -> EewParser.parseCencDirectory(item, loc, standard)
     }
 
     private fun handleMessage(text: String, ws: WebSocket, session: Long) {
@@ -192,12 +220,14 @@ class WolfxSource(
         val resolvedType = type.ifEmpty { "cwa_eew" }
         if (resolvedType !in WolfxProtocol.EEW_TYPES) return
         val parsed = EewParser.parse(obj, locationProvider(), standardProvider(),
-            WolfxProtocol.TITLES[resolvedType] ?: resolvedType, "wolfx_") ?: return
+            WolfxProtocol.TITLES[resolvedType] ?: resolvedType, "wolfx_",
+            originTimeIsJst = resolvedType == "jma_eew",
+            eventNamespace = resolvedType) ?: return
         if (parsed.timestamp > 0 && AppClock.now() - parsed.timestamp > WolfxProtocol.EEW_LIVE_WINDOW_MS) return
-        _events.tryEmit(WolfxEvent(parsed.copy(
+        _events.tryEmit(SourceEvent(parsed.copy(
             sourceProvider = WolfxProtocol.PROVIDER,
             sourceAgency = WolfxProtocol.agencyFor(resolvedType),
-        ), WolfxEventKind.EEW, session))
+        ), SourceEventKind.LIVE, session))
     }
 
     private fun listener(session: Long, socketAttempt: Long) = object : WebSocketListener() {
@@ -242,5 +272,13 @@ class WolfxSource(
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = synchronized(lock) {
             if (current(session, socketAttempt)) disconnected(session, true)
         }
+    }
+
+    private companion object {
+        /** 目录端点（URL → 该源报数机构）；全部成功才视为目录健康。 */
+        val DIRECTORY_ENDPOINTS = listOf(
+            WolfxProtocol.EQ_LIST_URL to WolfxProtocol.DIRECTORY_AGENCY,
+            WolfxProtocol.JMA_EQ_LIST_URL to WolfxProtocol.DIRECTORY_AGENCY_JMA,
+        )
     }
 }

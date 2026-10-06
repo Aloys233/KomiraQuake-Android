@@ -11,7 +11,9 @@ import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.interaction.collectIsHoveredAsState
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -31,6 +33,7 @@ import androidx.compose.ui.unit.sp
 import com.aloys23.komiraquake.R
 import com.aloys23.komiraquake.ui.theme.AppSurfaces
 import com.aloys23.komiraquake.ui.theme.SeismicColors
+import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.Switch
 
 /** Official Lucide vectors only. Decorative icons use a null description. */
@@ -161,16 +164,97 @@ fun PageHeader(title: String, subtitle: String, icon: AppIcon, dark: Boolean, mo
     }
 }
 
+/**
+ * 开关行。[enabled] 为 false 时整行置灰且不可点——用于表达「该选项被上级开关挡住」，
+ * 避免留下可点却不生效的控件让用户误以为设置已生效。对齐桌面端 GlassSwitch 的行为。
+ */
 @Composable
-fun AppSwitchRow(title: String, checked: Boolean, dark: Boolean, onChange: (Boolean) -> Unit, summary: String? = null) {
+fun AppSwitchRow(
+    title: String, checked: Boolean, dark: Boolean, onChange: (Boolean) -> Unit,
+    summary: String? = null, enabled: Boolean = true,
+) {
+    val titleColor = if (enabled) AppSurfaces.onSurface(dark) else AppSurfaces.disabled(dark)
+    val summaryColor = if (enabled) AppSurfaces.outline(dark) else AppSurfaces.disabled(dark)
     Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         Column(Modifier.weight(1f)) {
-            Label(title, AppSurfaces.onSurface(dark), 14.sp)
-            summary?.let { Label(it, AppSurfaces.outline(dark), 12.sp, modifier = Modifier.padding(top = 4.dp)) }
+            Label(title, titleColor, 14.sp)
+            summary?.let { Label(it, summaryColor, 12.sp, modifier = Modifier.padding(top = 4.dp)) }
         }
         Box(Modifier.heightIn(min = 48.dp), contentAlignment = Alignment.Center) {
-            Switch(checked = checked, onCheckedChange = onChange, modifier = Modifier.semantics { contentDescription = title })
+            Switch(
+                checked = checked, onCheckedChange = onChange, enabled = enabled,
+                modifier = Modifier.semantics { contentDescription = title },
+            )
+        }
+    }
+}
+
+/**
+ * 滑块行：标题行右侧内联当前数值，下方是滑块与说明。
+ * 数值与滑块同处一个视觉单元，避免「数值写在别处、控件在别处」的对不上感。
+ */
+@Composable
+fun AppSliderRow(
+    title: String, valueText: String, value: Float, onValueChange: (Float) -> Unit,
+    dark: Boolean, valueRange: ClosedFloatingPointRange<Float>, steps: Int,
+    modifier: Modifier = Modifier, summary: String? = null, enabled: Boolean = true,
+) {
+    val titleColor = if (enabled) AppSurfaces.onSurface(dark) else AppSurfaces.disabled(dark)
+    val valueColor = if (enabled) AppSurfaces.onSurface(dark) else AppSurfaces.disabled(dark)
+    val summaryColor = if (enabled) AppSurfaces.outline(dark) else AppSurfaces.disabled(dark)
+    Column(modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Label(title, titleColor, 14.sp, modifier = Modifier.weight(1f))
+            Label(valueText, valueColor, 14.sp, bold = true)
+        }
+        Spacer(Modifier.height(2.dp))
+        Slider(
+            value = value, onValueChange = onValueChange,
+            valueRange = valueRange, steps = steps, enabled = enabled,
+        )
+        summary?.let { Label(it, summaryColor, 12.sp, modifier = Modifier.padding(top = 6.dp)) }
+    }
+}
+
+/**
+ * 分类 Tab 栏。横向可滚，选中项用 accentContainer 底 + accent 文字 + 下划线。
+ * 手搓而非引入 Miuix TabRow：全项目只有 Slider/Switch/TextField 用 Miuix，
+ * 其余控件都基于 AppSurfaces 自建设计系统，Tab 必须与之同源。
+ */
+@Composable
+fun AppTabRow(
+    tabs: List<String>, selectedIndex: Int, onSelect: (Int) -> Unit,
+    dark: Boolean, modifier: Modifier = Modifier,
+) {
+    LazyRow(
+        modifier.fillMaxWidth(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        items(tabs.size) { index ->
+            val selected = index == selectedIndex
+            val labelColor = if (selected) AppSurfaces.accent(dark) else AppSurfaces.outline(dark)
+            Column(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (selected) AppSurfaces.accentContainer(dark) else Color.Transparent)
+                    .selectable(
+                        selected = selected, role = Role.Tab,
+                        onClick = { onSelect(index) },
+                    )
+                    .semantics { contentDescription = tabs[index] }
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Label(tabs[index], labelColor, 14.sp, bold = selected)
+                Box(
+                    Modifier.height(2.dp).width(20.dp)
+                        .clip(RoundedCornerShape(1.dp))
+                        .background(if (selected) AppSurfaces.accent(dark) else Color.Transparent),
+                )
+            }
         }
     }
 }

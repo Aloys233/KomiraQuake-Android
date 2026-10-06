@@ -25,9 +25,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.nativeCanvas
@@ -46,7 +49,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aloys23.komiraquake.core.AppClock
 import com.aloys23.komiraquake.core.CoordinateTransform
-import com.aloys23.komiraquake.core.QuakeCalculator
+import com.aloys23.komiraquake.core.IntensityCalculator
 import com.aloys23.komiraquake.core.TravelTimeService
 import com.aloys23.komiraquake.model.EarthquakeEvent
 import com.aloys23.komiraquake.model.WarningLevel
@@ -82,9 +85,13 @@ private const val TILE_SIZE = 256
 private const val WAVE_TABLE_SWITCH_KM = 2000.0
 private const val WAVE_MAX_RADIUS_KM = 10000.0
 private const val WAVE_WINDOW_MS = 60L * 60L * 1000L
+/** 波前隐去的烈度阈值（CSIS I：可感下限）；超过该烈度对应的半径后波前渐隐。 */
+private const val CSIS_FADE_LEVEL = 1.0
 
 /** 视口外多取一圈瓦片，平移时新露出的区域已就绪，不会一格一格拼出来。 */
 private const val TILE_PREFETCH_MARGIN = 1
+/** 跟随时新瓦片淡入时长（ms）：掩盖跨层级切换的清晰度突变。 */
+private const val TILE_FADE_MS = 180f
 private const val MIN_ZOOM = 1f
 private const val MAX_ZOOM = 18f
 
@@ -114,14 +121,6 @@ val AmapVector = Basemap(
     isGcj02 = true,
 )
 
-val CartoDark = Basemap(
-    id = "carto_dark",
-    name = "CARTO 深色",
-    urlTemplate = "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png",
-    subdomains = listOf("a", "b", "c", "d"),
-    maxZoom = 20,
-)
-
 val Osm = Basemap(
     id = "osm",
     name = "OpenStreetMap",
@@ -138,7 +137,8 @@ val Petal = Basemap(
     maxZoom = 18,
 )
 
-val Basemaps = listOf(AmapVector, CartoDark, Osm, Petal)
+// 与桌面端 MapView 保持一致：同样的四个底图，不含各端独有的项。
+val Basemaps = listOf(AmapVector, Petal, Osm)
 
 private fun worldSize(z: Int) = TILE_SIZE.toDouble() * 2.0.pow(z)
 private fun projX(lon: Double, z: Int) = (lon + 180.0) / 360.0 * worldSize(z)
@@ -175,9 +175,9 @@ private fun tileUrl(basemap: Basemap, x: Int, y: Int, z: Int): String {
 
 /**
  * 目标瓦片未就绪时，用已缓存的最近父瓦片放大顶替，避免出现空白块。
- * 只读 [TileLoader] 缓存，不触发网络。
+ * 只读 [TileLoader] 缓存，不触发网络。返回是否真的画了（用于判断淡入时是否有底可垫）。
  */
-private fun DrawScope.drawParentTile(tile: TileRef, basemap: Basemap, loader: TileLoader, dst: IntSize) {
+private fun DrawScope.drawParentTile(tile: TileRef, basemap: Basemap, loader: TileLoader, dst: IntSize): Boolean {
     var level = tile.z
     var px = tile.x
     var py = tile.y
@@ -189,7 +189,7 @@ private fun DrawScope.drawParentTile(tile: TileRef, basemap: Basemap, loader: Ti
         factor *= 2
         val parent = loader.peek(tileUrl(basemap, px, py, level)) ?: continue
         val sub = parent.width / factor
-        if (sub <= 0) return
+        if (sub <= 0) return false
         drawImage(
             image = parent,
             srcOffset = IntOffset((tile.x % factor) * sub, (tile.y % factor) * sub),
@@ -197,8 +197,9 @@ private fun DrawScope.drawParentTile(tile: TileRef, basemap: Basemap, loader: Ti
             dstOffset = IntOffset(tile.px.roundToInt(), tile.py.roundToInt()),
             dstSize = dst,
         )
-        return
+        return true
     }
+    return false
 }
 
 /** 反解走时表得到 P/S 波前半径（km）；超出量程记 -1（不画）。 */
@@ -213,6 +214,13 @@ private fun waveRadii(depthKm: Double, seconds: Double): Pair<Double, Double> {
     // jb 表上限 10000 km 同样会 clamp，到端点即视为超出量程不再画。
     return (if (p >= WAVE_MAX_RADIUS_KM) -1.0 else p) to (if (s >= WAVE_MAX_RADIUS_KM) -1.0 else s)
 }
+
+/**
+ * 聚焦取景半径（km）：有活跃波前时跟随较大的那一片并设 100 km 下限，避免 t≈0 时贴得过近；
+ * P/S 全部隐藏（历史事件，或已淡出）时用固定 300 km。
+ */
+internal fun focusRadiusKm(pKm: Double, sKm: Double): Double =
+    if (pKm < 0.0 && sKm < 0.0) 300.0 else maxOf(100.0, pKm, sKm)
 
 /**
  * Compose 自绘栅格瓦片地图。《NATIVE_PORT_SPEC》 §8 / §12。
@@ -231,6 +239,13 @@ fun MapScreen(
     modifier: Modifier = Modifier,
     cameraRequest: Long = 0L,
     topOcclusion: androidx.compose.ui.unit.Dp = 310.dp,
+    /** 波前出现/结束回调：供上层收起 HUD。 */
+    onWavesStarted: () -> Unit = {},
+    onWavesFinished: () -> Unit = {},
+    /** 是否存在活动预警：空闲自动归位时优先回到预警震中而非我的位置。 */
+    warningActive: Boolean = false,
+    /** 用户操作地图后，无操作多久自动回到默认视野（我的位置 / 全国概览）。 */
+    idleResetMs: Long = 20_000L,
 ) {
     val glass = LocalMapGlass.current
     DisposableEffect(glass) { onDispose { glass?.sourceReady = false } }
@@ -243,6 +258,10 @@ fun MapScreen(
     // 用户是否手动控制过镜头（拖动/缩放/定位/退出跟随），避免定位到达时抢镜头。
     var userMovedCamera by remember { mutableStateOf(false) }
     var initializedLocation by remember { mutableStateOf(false) }
+    // 波前是否出现过：用于识别"波前消失"的时刻，自动归位并收起 HUD。
+    var wavesShown by remember { mutableStateOf(false) }
+    // 用户操作地图的计数器：每次变化即重置"空闲自动归位"计时。
+    var interactionTick by remember { mutableStateOf(0) }
     // Ordinary fixes never interrupt a user's camera. Only use the first fix if idle.
     LaunchedEffect(userLat, userLon) {
         if (!initializedLocation && userLat != null && userLon != null) {
@@ -264,21 +283,36 @@ fun MapScreen(
         if (focusEvent == null || !waveEligible) return@LaunchedEffect
         do {
             waveNow = AppClock.now()
-            delay(100)
+            // 跟随时按显示帧率刷新，波前缩放的跟随才够细腻（不在一格一格地跳）；
+            // 未跟随时 100ms 足够画波前圆，避免整屏无谓重组。
+            if (following) withFrameNanos { } else delay(100)
         } while (waveNow - focusEvent.timestamp <= WAVE_WINDOW_MS && !focusEvent.isCanceled)
     }
 
     val focus = focusEvent
     val waveSeconds = if (focus != null) (waveNow - focus.timestamp) / 1000.0 else -1.0
+    // 波前"影响半径"：CSIS 降到可感下限（I）时的震中距。有意取代 kanameishi 的经验式
+    // clamp(50·M², 200, 2000)。震级未知（<=0）时无法反解，退回量程上限，保证波前仍可见。
+    val waveFadeKm = if (focus != null && focus.magnitude > 0.0) {
+        IntensityCalculator.distanceForCsis(focus.magnitude, focus.depth, CSIS_FADE_LEVEL)
+    } else {
+        WAVE_MAX_RADIUS_KM
+    }
     val (pKm, sKm) = if (waveEligible && focus != null && !focus.isCanceled && focus.timestamp > 0 && waveSeconds >= 0.0 &&
         waveNow - focus.timestamp <= WAVE_WINDOW_MS
     ) {
         val (p, s) = waveRadii(focus.depth, waveSeconds)
-        // P、S 波都离开中国范围后一起隐藏，避免留下无意义的巨大波前圆（见 QuakeCalculator）。
-        if (QuakeCalculator.bothWavesBeyondChina(focus.latitude, focus.longitude, p, s)) -1.0 to -1.0 else p to s
+        // 透明度归零即视为隐藏：半径记 -1，取景与绘制都会跳过。
+        fun visibleRadius(r: Double): Double =
+            if (r > 0.0 && IntensityCalculator.waveOpacity(r, waveFadeKm) > 0.0) r else -1.0
+        visibleRadius(p) to visibleRadius(s)
     } else {
         -1.0 to -1.0
     }
+    val pOpacity = if (pKm > 0.0) IntensityCalculator.waveOpacity(pKm, waveFadeKm) else 0.0
+    val sOpacity = if (sKm > 0.0) IntensityCalculator.waveOpacity(sKm, waveFadeKm) else 0.0
+    // S 波径向渐变填充的不透明度：只在影响半径内可见（对齐 kanameishi 的 sWaveFill）。
+    val sFillOpacity = if (sKm > 0.0) IntensityCalculator.waveFillOpacity(sKm, waveFadeKm) else 0.0
 
     BoxWithConstraints(modifier = modifier.clip(RoundedCornerShape(0.dp))) {
         val mapHeight = maxHeight
@@ -339,21 +373,18 @@ fun MapScreen(
             val (lat, lon) = position(event.latitude, event.longitude)
             val ex = normX(lon)
             val ey = normY(lat)
-            val user = if (userLat != null && userLon != null) position(userLat, userLon) else null
-            val ux = user?.let { ex + wrappedDelta(normX(it.second) - ex) } ?: ex
-            val uy = user?.let { normY(it.first) } ?: ey
-            // Bounded wave context; global wavefronts must not zoom out indefinitely.
-            val radiusKm = maxOf(50.0, pKm.coerceIn(0.0, 300.0), sKm.coerceIn(0.0, 300.0))
+            // 只框震中区域，不并入用户所在地；半径随 P/S 波前扩大（100km 下限 / 无波 300km）。
+            val radiusKm = focusRadiusKm(pKm, sKm)
             val radius = radiusKm / (40075.0 * cos(lat * PI / 180.0).coerceAtLeast(0.05))
-            val left = minOf(ex - radius, ux)
-            val right = maxOf(ex + radius, ux)
-            val top = minOf(ey - radius, uy)
-            val bottom = maxOf(ey + radius, uy)
+            val left = ex - radius
+            val right = ex + radius
+            val top = ey - radius
+            val bottom = ey + radius
             val availableW = (widthPx - 2 * sideInsetPx).coerceAtLeast(80f)
             val availableH = (heightPx - topInsetPx - bottomInsetPx).coerceAtLeast(80f)
             val scale = minOf(availableW / (right - left), availableH / (bottom - top))
-            // 取整到整数层级（对齐 Leaflet fitBounds 的 floor），静止时瓦片 1:1 渲染、无缩放拉伸。
-            zoom = floor(ln(scale / TILE_SIZE) / LN2).toFloat().coerceIn(MIN_ZOOM, minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
+            // 无级缩放：不取整，随波前连续变化（瓦片渲染器本就支持非整数 zoom）。
+            zoom = (ln(scale / TILE_SIZE) / LN2).toFloat().coerceIn(MIN_ZOOM, minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
             val world = TILE_SIZE * 2.0.pow(zoom.toDouble())
             val targetY = topInsetPx + availableH / 2.0
             centerLon = wrapLon((left + right) / 2.0 * 360.0 - 180.0)
@@ -361,9 +392,33 @@ fun MapScreen(
             following = true
         }
         LaunchedEffect(focusEvent?.identity, cameraRequest) { fitFocus() }
+        // 波前每 ~100ms 变化一次；仅在跟随中重取景，用户拖动后 following=false 自动停止。
+        LaunchedEffect(waveNow) { if (following) fitFocus() }
         LaunchedEffect(widthPx, heightPx, topOcclusion) {
             if (following) fitFocus()
             else if (focusEvent == null && !userMovedCamera) fitChina()
+        }
+        // 波前全部消失（走完/淡出/事件结束）：若仍在跟随震中，自动回到我的位置（无定位则全国概览），
+        // 并通知上层收起 HUD。用户已手动操作过镜头（following=false）时不抢镜头。
+        val hasWaves = pKm > 0.0 || sKm > 0.0
+        LaunchedEffect(hasWaves) {
+            if (hasWaves) {
+                wavesShown = true
+                onWavesStarted()
+            } else if (wavesShown) {
+                wavesShown = false
+                if (following) resetToDefaultView()
+                onWavesFinished()
+            }
+        }
+        // 空闲自动归位：用户拖动/缩放后一段时间无操作且未在跟随事件，则回到默认视野。
+        LaunchedEffect(interactionTick) {
+            if (interactionTick == 0) return@LaunchedEffect
+            delay(idleResetMs)
+            if (!following) {
+                // 有活动预警时归位到预警震中并重新跟随；否则回到我的位置（无定位则全国概览）。
+                if (warningActive && focusEvent != null) fitFocus() else resetToDefaultView()
+            }
         }
 
         val tileZoom = zoom.roundToInt().coerceIn(MIN_ZOOM.toInt(), basemap.maxZoom)
@@ -399,11 +454,32 @@ fun MapScreen(
 
         val images = remember { mutableStateMapOf<String, ImageBitmap>() }
         val pending = remember { mutableSetOf<String>() }
+        // 每个瓦片首次出现的时刻（ms），用于淡入（见绘制处的 alpha）。
+        val tileAppearAt = remember { mutableStateMapOf<String, Long>() }
         val loadScope = rememberCoroutineScope()
+        // 瓦片淡入的逐帧时钟：仅在跟随时或仍有瓦片处于淡入窗口内时按帧推进，
+        // 空闲时降到 100ms 轮询，避免常驻 60Hz 重组。手动缩放/平移也能平滑淡入。
+        var frameNow by remember { mutableStateOf(AppClock.now()) }
+        LaunchedEffect(Unit) {
+            while (true) {
+                val fading = tileAppearAt.values.any { frameNow - it < TILE_FADE_MS.toLong() }
+                if (following || fading) {
+                    withFrameNanos { }
+                    frameNow = AppClock.now()
+                } else {
+                    delay(100)
+                }
+            }
+        }
         LaunchedEffect(tiles) {
             val wanted = tiles.mapTo(HashSet()) { it.url }
             // 丢弃移出视野的瓦片，避免状态表无限增长（解码位图仍由 TileLoader 的 LRU 持有）。
-            images.keys.toList().forEach { if (it !in wanted) images.remove(it) }
+            images.keys.toList().forEach {
+                if (it !in wanted) {
+                    images.remove(it)
+                    tileAppearAt.remove(it)
+                }
+            }
             for (tile in tiles) {
                 val url = tile.url
                 if (images.containsKey(url) || !pending.add(url)) continue
@@ -416,6 +492,7 @@ fun MapScreen(
                         val bmp = tileLoader.load(url)
                         if (bmp != null) {
                             images[url] = bmp
+                            if (!tileAppearAt.containsKey(url)) tileAppearAt[url] = AppClock.now()
                             break
                         }
                         attempt++
@@ -441,6 +518,7 @@ fun MapScreen(
                     detectTransformGestures { centroid, pan, gestureZoom, _ ->
                         following = false
                         userMovedCamera = true
+                        interactionTick++
                         val viewW = size.width.toFloat()
                         val viewH = size.height.toFloat()
 
@@ -478,14 +556,31 @@ fun MapScreen(
                 for (tile in tiles) {
                     val dst = IntSize(tile.size.roundToInt(), tile.size.roundToInt())
                     val bmp = images[tile.url]
-                    if (bmp != null) {
+                    if (bmp == null) {
+                        drawParentTile(tile, basemap, tileLoader, dst)
+                        continue
+                    }
+                    // 新瓦片淡入，掩盖跨层级清晰度突变造成的顿挫。
+                    // 底下有父瓦片可垫时才淡入（否则半透明会露出底色）；否则直接显示。
+                    val appearAt = tileAppearAt[tile.url]
+                    val alpha = if (appearAt != null) {
+                        ((frameNow - appearAt).toFloat() / TILE_FADE_MS).coerceIn(0f, 1f)
+                    } else {
+                        1f
+                    }
+                    if (alpha < 1f && drawParentTile(tile, basemap, tileLoader, dst)) {
+                        drawImage(
+                            image = bmp,
+                            dstOffset = IntOffset(tile.px.roundToInt(), tile.py.roundToInt()),
+                            dstSize = dst,
+                            alpha = alpha,
+                        )
+                    } else {
                         drawImage(
                             image = bmp,
                             dstOffset = IntOffset(tile.px.roundToInt(), tile.py.roundToInt()),
                             dstSize = dst,
                         )
-                    } else {
-                        drawParentTile(tile, basemap, tileLoader, dst)
                     }
                 }
 
@@ -501,38 +596,35 @@ fun MapScreen(
                 // P/S 波前圆：反解走时表得到半径（km），-1 表示不画。
                 if (pKm > 0.0) {
                     drawCircle(
-                        color = SeismicColors.P_WAVE,
+                        color = SeismicColors.P_WAVE.copy(alpha = pOpacity.toFloat()),
                         radius = (pKm * pxPerKm).toFloat(),
                         center = Offset(fx, fy),
                         style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f))),
                     )
                     drawContext.canvas.nativeCanvas.drawText("P 纵波", fx + 8f, fy - (pKm * pxPerKm).toFloat() - 6f, labelPaint)
                 }
+                // S 波径向渐变填充：中心透明、边缘着色，衬在描边之下（对齐 kanameishi 的 sWaveFill）。
+                if (sKm > 0.0 && sFillOpacity > 0.0) {
+                    val fillRadius = (sKm * pxPerKm).toFloat()
+                    drawCircle(
+                        brush = Brush.radialGradient(
+                            colors = listOf(Color.Transparent, SeismicColors.S_WAVE),
+                            center = Offset(fx, fy),
+                            radius = fillRadius,
+                        ),
+                        radius = fillRadius,
+                        center = Offset(fx, fy),
+                        alpha = sFillOpacity.toFloat(),
+                    )
+                }
                 if (sKm > 0.0) {
                     drawCircle(
-                        color = SeismicColors.S_WAVE,
+                        color = SeismicColors.S_WAVE.copy(alpha = sOpacity.toFloat()),
                         radius = (sKm * pxPerKm).toFloat(),
                         center = Offset(fx, fy),
                         style = Stroke(width = 2f),
                     )
                     drawContext.canvas.nativeCanvas.drawText("S 横波", fx + 8f, fy + (sKm * pxPerKm).toFloat() + 18f, labelPaint)
-                }
-
-                // 震中距离参考同心圆环 (50km, 100km, 200km, 300km 虚线环)
-                val distanceRings = listOf(50.0, 100.0, 200.0, 300.0)
-                for (distKm in distanceRings) {
-                    val ringRadius = (distKm * pxPerKm).toFloat()
-                    if (ringRadius in 8f..2500f) {
-                        drawCircle(
-                            color = AppSurfaces.onSurface(dark).copy(alpha = 0.2f),
-                            radius = ringRadius,
-                            center = Offset(fx, fy),
-                            style = Stroke(
-                                width = 1.5f,
-                                pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f),
-                            ),
-                        )
-                    }
                 }
 
                 // 震中 X 十字：10px 米黄描边打底 + 6px 红描边，圆头。
@@ -593,6 +685,7 @@ fun MapScreen(
                 MapFloatingButton(AppIcon.Plus, dark, "放大地图", zoom < minOf(MAX_ZOOM, basemap.maxZoom.toFloat())) {
                     following = false
                     userMovedCamera = true
+                    interactionTick++
                     val target = (zoom.roundToInt() + 1).toFloat()
                         .coerceAtMost(minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
                     zoom = target
@@ -601,6 +694,7 @@ fun MapScreen(
                 MapFloatingButton(AppIcon.Minus, dark, "缩小地图", zoom > MIN_ZOOM) {
                     following = false
                     userMovedCamera = true
+                    interactionTick++
                     val target = (zoom.roundToInt() - 1).toFloat().coerceAtLeast(MIN_ZOOM)
                     zoom = target
                 }
@@ -609,6 +703,7 @@ fun MapScreen(
                     MapFloatingButton(AppIcon.Locate, dark, "定位到我的位置") {
                         following = false
                         userMovedCamera = true
+                        interactionTick++
                         val position = shift(userLat, userLon)
                         centerLat = position.first
                         centerLon = position.second
@@ -618,7 +713,7 @@ fun MapScreen(
                 // 回到震中 / 退出跟随
                 if (focus != null) {
                     MapFloatingButton(AppIcon.Navigation, dark,
-                        if (following) "正在跟随事件；点击退出跟随" else "恢复事件视野，显示震中和本地位置",
+                        if (following) "正在跟随事件；点击退出跟随" else "恢复事件视野，聚焦震中区域",
                         selected = following) {
                         if (following) resetToDefaultView() else fitFocus()
                     }

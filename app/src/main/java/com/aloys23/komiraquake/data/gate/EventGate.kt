@@ -7,7 +7,8 @@ enum class EventGateDecision { PASS, CORRECTION, DUPLICATE, STALE }
 
 /**
  * 事件去重与报数管理。《NATIVE_PORT_SPEC》 §5。
- * 不做跨机构合并：key = source|id。
+ * key = 报数机构 + 频道化 eventId（[EarthquakeEvent.identity]，不含聚合商）：同一份上游报文
+ * 经 Wolfx 与 Pancakes 两路送达时落进同一条目，互为备份而不重复。
  */
 class EventGate(
     private val maxAgeMs: Long = 60L * 60L * 1000L,
@@ -30,6 +31,9 @@ class EventGate(
         if (event.reportNum < prev.event.reportNum) return EventGateDecision.STALE
         if (event.reportNum == prev.event.reportNum) {
             if (sameBody(event, prev.event)) return EventGateDecision.DUPLICATE
+            // 跨聚合商同报次：现任优先（先到者胜）。两路转发的同一报文若字段有细微差异，
+            // 会随各自轮询反复互相覆盖而抖动；只有更高报次才接管。同源修正仍生效。
+            if (event.sourceProvider != prev.event.sourceProvider) return EventGateDecision.DUPLICATE
             prev.event = event
             return EventGateDecision.CORRECTION
         }

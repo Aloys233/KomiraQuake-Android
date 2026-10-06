@@ -1,6 +1,7 @@
 package com.aloys23.komiraquake.data.source.wolfx
 
 import com.aloys23.komiraquake.core.IntensityStandard
+import com.aloys23.komiraquake.data.source.SourceEvent
 import com.aloys23.komiraquake.model.ConnectionStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -42,7 +43,12 @@ class WolfxSourceTest {
     }
     private fun response(request: Request) = Response.Builder().request(request)
         .protocol(Protocol.HTTP_1_1).code(200).message("OK").body(
-            """{"No1":{"id":"catalog-id","magnitude":4.5,"latitude":30,"longitude":100}}""".toResponseBody(),
+            if (request.url.toString().contains("jma_eqlist")) {
+                """{"No1":{"EventID":"20261006134727","time_full":"2026/10/06 13:47:00","location":"熊本県熊本地方","magnitude":"2.9","shindo":"1","depth":"10km","latitude":"32.6","longitude":"130.7"}}"""
+                    .toResponseBody()
+            } else {
+                """{"No1":{"id":"catalog-id","magnitude":4.5,"latitude":30,"longitude":100}}""".toResponseBody()
+            },
         ).build()
 
     /** Ignores cancel intentionally, modeling a response already in flight at disable time. */
@@ -107,7 +113,7 @@ class WolfxSourceTest {
         val calls = Calls()
         val source = WolfxSource(scope, OkHttpClient(), { null }, { IntensityStandard.CSIS }, Sockets(), calls)
         val delivered = CountDownLatch(1)
-        var event: WolfxEvent? = null
+        var event: SourceEvent? = null
         scope.launch { source.events.collect { event = it; delivered.countDown() } }
         try {
             source.start()

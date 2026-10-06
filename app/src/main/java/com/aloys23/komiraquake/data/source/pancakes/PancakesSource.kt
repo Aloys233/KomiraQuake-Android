@@ -2,9 +2,13 @@ package com.aloys23.komiraquake.data.source.pancakes
 
 import com.aloys23.komiraquake.core.AppClock
 import com.aloys23.komiraquake.core.IntensityStandard
+import com.aloys23.komiraquake.core.NetworkGate
+import com.aloys23.komiraquake.data.source.EarthquakeSource
+import com.aloys23.komiraquake.data.source.SourceEvent
+import com.aloys23.komiraquake.data.source.SourceEventKind
+import com.aloys23.komiraquake.data.source.awaitReconnectDelay
 import com.aloys23.komiraquake.model.ConnectionStatus
 import com.aloys23.komiraquake.model.DataSourceInfo
-import com.aloys23.komiraquake.model.EarthquakeEvent
 import com.aloys23.komiraquake.model.SourceIds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -28,9 +32,6 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 
-/** Consumers must call [PancakesSource.isCurrent] before applying buffered events. */
-data class PancakesEvent(val event: EarthquakeEvent, val kind: PancakesKind, val generation: Long = 0)
-
 /**
  * PancakesAPI 数据源：聚合 WebSocket 实时预警 + 各地震子源的 HTTP 目录轮询。
  *
@@ -45,15 +46,18 @@ class PancakesSource(
     private val standardProvider: () -> IntensityStandard,
     socketFactory: WebSocket.Factory? = null,
     private val callFactory: Call.Factory = okHttp,
-) {
+    /** 网络感知重连；默认恒在线，退化为固定退避。 */
+    private val networkGate: NetworkGate = NetworkGate.AlwaysOnline,
+) : EarthquakeSource {
+    override val id: String get() = SourceIds.PANCAKES
     private val lock = Any()
-    private val _events = MutableSharedFlow<PancakesEvent>(extraBufferCapacity = 128)
-    val events: SharedFlow<PancakesEvent> = _events.asSharedFlow()
+    private val _events = MutableSharedFlow<SourceEvent>(extraBufferCapacity = 128)
+    override val events: SharedFlow<SourceEvent> = _events.asSharedFlow()
     private val _status = MutableStateFlow(DataSourceInfo(
         id = SourceIds.PANCAKES, name = "Pancakes", region = "全球",
         description = "Pancakes 聚合（GQ/USGS/JMA）",
     ))
-    val status: StateFlow<DataSourceInfo> = _status.asStateFlow()
+    override val status: StateFlow<DataSourceInfo> = _status.asStateFlow()
     private val sockets = socketFactory ?: okHttp.newBuilder()
         .readTimeout(0, TimeUnit.MILLISECONDS).pingInterval(25, TimeUnit.SECONDS).build()
     private var running = false
@@ -65,24 +69,26 @@ class PancakesSource(
     private var pollJob: Job? = null
     private var reconnectJob: Job? = null
 
-    fun isCurrent(event: PancakesEvent): Boolean = synchronized(lock) { current(event.generation) }
+    override fun isCurrent(event: SourceEvent): Boolean = synchronized(lock) { current(event.generation) }
     private fun current(session: Long) = running && generation == session
     private fun current(session: Long, socketAttempt: Long) = current(session) && attempt == socketAttempt
 
-    fun start() = synchronized(lock) {
+    override fun start() = synchronized(lock) {
         if (running) return@synchronized
         running = true
         val session = ++generation
         connect(session)
         pollJob = scope.launch(Dispatchers.IO) {
             while (isActive) {
+                // 断网时不发注定失败的目录请求，等恢复后由 awaitOnline 立刻唤醒。
+                if (networkGate.awaitOnline()) retryCount = 0
                 pollDirectory(session)
                 delay(PancakesProtocol.POLL_INTERVAL_MS)
             }
         }
     }
 
-    fun stop() = synchronized(lock) {
+    override fun stop() = synchronized(lock) {
         running = false
         generation++
         attempt++
@@ -101,7 +107,7 @@ class PancakesSource(
     }
 
     /** Derived local values are recalculated by the repository, never by starting networking. */
-    fun onLocationChanged() = Unit
+    override fun onLocationChanged() = Unit
 
     private fun connect(session: Long) {
         if (!current(session)) return
@@ -120,12 +126,16 @@ class PancakesSource(
         val delayMs = (3 + retryCount++).coerceIn(3, 15) * 1000L
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
-            delay(delayMs)
-            synchronized(lock) { if (current(session)) connect(session) }
+            val resumed = awaitReconnectDelay(networkGate, delayMs)
+            synchronized(lock) {
+                if (!current(session)) return@synchronized
+                if (resumed) retryCount = 0
+                connect(session)
+            }
         }
     }
 
-    fun refreshDirectory() = synchronized(lock) {
+    override fun refreshDirectory() = synchronized(lock) {
         if (!running) return@synchronized
         val session = generation
         scope.launch(Dispatchers.IO) { pollDirectory(session) }
@@ -178,7 +188,7 @@ class PancakesSource(
                     for (i in 0 until array.length()) {
                         val item = array.optJSONObject(i) ?: continue
                         val parsed = PancakesParser.parseListItem(item, loc, standard, AppClock.now()) ?: continue
-                        _events.tryEmit(PancakesEvent(parsed, PancakesKind.DIRECTORY, session))
+                        _events.tryEmit(SourceEvent(parsed, SourceEventKind.DIRECTORY, session))
                     }
                     _status.value = _status.value.copy(directoryLatencyMs = AppClock.elapsedMs() - started)
                 }
@@ -194,7 +204,7 @@ class PancakesSource(
         val parsed = PancakesParser.parseRealtime(obj, locationProvider(), standardProvider(), AppClock.now()) ?: return
         val now = AppClock.now()
         if (parsed.event.timestamp > 0 && now - parsed.event.timestamp > PancakesProtocol.LIVE_WINDOW_MS) return
-        _events.tryEmit(PancakesEvent(parsed.event, parsed.kind, session))
+        _events.tryEmit(SourceEvent(parsed.event, parsed.kind, session))
     }
 
     private fun listener(session: Long, socketAttempt: Long) = object : WebSocketListener() {

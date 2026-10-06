@@ -1,21 +1,24 @@
 package com.aloys23.komiraquake.data
 
 import com.aloys23.komiraquake.core.AppClock
+import com.aloys23.komiraquake.core.NetworkGate
 import com.aloys23.komiraquake.core.QuakeCalculator
 import com.aloys23.komiraquake.data.db.HistoryStore
 import com.aloys23.komiraquake.data.gate.EventGate
 import com.aloys23.komiraquake.data.gate.EventGateDecision
 import com.aloys23.komiraquake.data.gate.EventLifecycle
 import com.aloys23.komiraquake.data.prefs.SettingsStore
+import com.aloys23.komiraquake.data.source.EarthquakeSource
 import com.aloys23.komiraquake.data.source.EewParser
-import com.aloys23.komiraquake.data.source.pancakes.PancakesKind
+import com.aloys23.komiraquake.data.source.SourceEventKind
+import com.aloys23.komiraquake.data.source.jian.JianSource
 import com.aloys23.komiraquake.data.source.pancakes.PancakesSource
-import com.aloys23.komiraquake.data.source.wolfx.WolfxEventKind
+import com.aloys23.komiraquake.data.source.simulated.SimulatedSource
 import com.aloys23.komiraquake.data.source.wolfx.WolfxSource
+import com.aloys23.komiraquake.data.source.whews.WhewsSource
 import com.aloys23.komiraquake.model.ConnectionStatus
 import com.aloys23.komiraquake.model.DataSourceInfo
 import com.aloys23.komiraquake.model.EarthquakeEvent
-import com.aloys23.komiraquake.model.SourceIds
 import com.aloys23.komiraquake.service.AlertPolicy
 import com.aloys23.komiraquake.service.LocationService
 import kotlinx.coroutines.CoroutineScope
@@ -39,6 +42,8 @@ class QuakeRepository(
     private val client: OkHttpClient,
     private val onAlert: (EarthquakeEvent) -> Unit = {},
     private val now: () -> Long = { AppClock.now() },
+    /** 网络感知重连；默认恒在线，退化为各源固定退避。 */
+    private val networkGate: NetworkGate = NetworkGate.AlwaysOnline,
 ) {
     private val directoryGate = EventGate()
     // Restore terminal identities before any source or collector can admit a replay.
@@ -50,8 +55,32 @@ class QuakeRepository(
         val lat = it.latitude; val lon = it.longitude
         if (lat != null && lon != null) lat to lon else null
     }
-    private val source = WolfxSource(scope, client, ::userPosition, { settings.current.intensityStandard })
-    private val pancakes = PancakesSource(scope, client, ::userPosition, { settings.current.intensityStandard })
+    // 数据源注册表：Wolfx / Pancakes / Jian / Whews … 平级、互为备份。新增源在此登记一行即可，
+    // 接线、启停、状态聚合与跨源合并都由通用逻辑处理。
+    private val jian = JianSource(
+        scope, client, ::userPosition, { settings.current.intensityStandard },
+        onRefreshToken = { rt -> settings.update { it.copy(jianRefreshToken = rt) } },
+        networkGate = networkGate,
+    )
+    private val whews = WhewsSource(
+        scope, client, ::userPosition, { settings.current.intensityStandard },
+        networkGate = networkGate,
+    )
+    /** 模拟源仅开发自测：需开发者模式开启且地址非空，否则 isConfigured() 为假、不会连接。 */
+    private val simulated = SimulatedSource(
+        scope, client, ::userPosition, { settings.current.intensityStandard },
+        devModeProvider = { settings.current.developerMode },
+        networkGate = networkGate,
+    )
+    private val sources: List<EarthquakeSource> = listOf(
+        WolfxSource(scope, client, ::userPosition, { settings.current.intensityStandard },
+            networkGate = networkGate),
+        PancakesSource(scope, client, ::userPosition, { settings.current.intensityStandard },
+            networkGate = networkGate),
+        jian,
+        whews,
+        simulated,
+    )
     private val _history = MutableStateFlow<List<EarthquakeEvent>>(emptyList())
     val historyEvents = _history.asStateFlow()
     private val _eventList = MutableStateFlow<List<EarthquakeEvent>>(emptyList())
@@ -75,28 +104,27 @@ class QuakeRepository(
     val mapCameraRequest = _mapCameraRequest.asStateFlow()
     /** 各数据源的独立链路状态，设置页逐条展示。 */
     val sourceInfos: StateFlow<List<DataSourceInfo>> =
-        combine(source.status, pancakes.status) { w, p -> listOf(w, p) }
-            .stateIn(scope, SharingStarted.Eagerly, listOf(source.status.value, pancakes.status.value))
+        combine(sources.map { it.status }) { arr -> arr.toList() }
+            .stateIn(scope, SharingStarted.Eagerly, sources.map { it.status.value })
     /** 状态栏用的聚合状态：任一启用源在线即视为在线。 */
-    val sourceInfo: StateFlow<DataSourceInfo> = combine(source.status, pancakes.status, settings.state) { w, p, s ->
-        aggregateSources(listOf(w, p).filter { it.id in s.enabledSources })
-    }.stateIn(scope, SharingStarted.Eagerly, source.status.value)
+    val sourceInfo: StateFlow<DataSourceInfo> =
+        combine(sourceInfos, settings.state) { infos, s -> aggregateSources(infos.filter { s.enabled(it.id) }) }
+            .stateIn(scope, SharingStarted.Eagerly, aggregateSources(sources.map { it.status.value }))
     private val _warningOverlayVisible = MutableStateFlow(false)
     val warningOverlayVisible = _warningOverlayVisible.asStateFlow()
 
     init {
-        scope.launch { source.events.collect {
-            synchronized(this@QuakeRepository) {
-                if (started && SourceIds.WOLFX in settings.current.enabledSources && source.isCurrent(it))
-                    handleEvent(it.event, it.kind == WolfxEventKind.DIRECTORY)
-            }
-        } }
-        scope.launch { pancakes.events.collect {
-            synchronized(this@QuakeRepository) {
-                if (started && SourceIds.PANCAKES in settings.current.enabledSources && pancakes.isCurrent(it))
-                    handleEvent(it.event, it.kind == PancakesKind.DIRECTORY)
-            }
-        } }
+        jian.setRefreshToken(settings.current.jianRefreshToken)
+        whews.setToken(settings.current.whewsToken)
+        simulated.setUrl(settings.current.simulatedUrl)
+        sources.forEach { src ->
+            scope.launch { src.events.collect { ev ->
+                synchronized(this@QuakeRepository) {
+                    if (started && settings.current.enabled(src.id) && src.isCurrent(ev))
+                        handleEvent(ev.event, ev.kind == SourceEventKind.DIRECTORY)
+                }
+            } }
+        }
         scope.launch { location.state.collect { recalculate() } }
         scope.launch { settings.state.collect {
             synchronized(this@QuakeRepository) {
@@ -110,10 +138,14 @@ class QuakeRepository(
         } }
     }
 
-    /** 依据启用集合启停各数据源；未启动时一律停，避免后台空跑。 */
+    /** 依据启用集合启停各数据源；未启动或凭据未就绪时一律停，避免无凭据连接与后台空跑。 */
     private fun applySourceToggles(s: com.aloys23.komiraquake.data.prefs.Settings) {
-        if (started && SourceIds.WOLFX in s.enabledSources) source.start() else source.stop()
-        if (started && SourceIds.PANCAKES in s.enabledSources) pancakes.start() else pancakes.stop()
+        // 令牌/地址变化须先于启停生效，否则新令牌要等下次启动才生效。
+        whews.setToken(s.whewsToken)
+        simulated.setUrl(s.simulatedUrl)
+        for (src in sources) {
+            if (started && s.enabled(src.id) && src.isConfigured()) src.start() else src.stop()
+        }
     }
 
     @Synchronized fun start() {
@@ -123,7 +155,7 @@ class QuakeRepository(
         recalculate()
         applySourceToggles(settings.current)
     }
-    @Synchronized fun stop() { started = false; source.stop(); pancakes.stop() }
+    @Synchronized fun stop() { started = false; for (src in sources) src.stop() }
     fun reloadCredentials() = Unit
     @Synchronized fun dismissWarningOverlay(identity: String? = null) {
         (identity ?: _activeWarning.value?.identity)?.let(collapsed::add)
@@ -147,16 +179,25 @@ class QuakeRepository(
         val event = EewParser.recalculate(raw, userPosition(), settings.current.intensityStandard, directory)
         if (directory) {
             when (directoryGate.admit(event, now())) {
-                EventGateDecision.DUPLICATE, EventGateDecision.STALE -> return
+                EventGateDecision.DUPLICATE, EventGateDecision.STALE -> {
+                    simulated.onAdmission(event, "duplicate"); return
+                }
                 else -> upsertHistory(event)
             }
             if (_mapFocus.value?.identity == event.identity && lifecycle.events.none { it.identity == event.identity }) _mapFocus.value = event
             refreshEventList()
+            simulated.onAdmission(event, "applied")
             return
         }
         val newEvent = lifecycle.events.none { it.identity == event.identity }
         val decision = lifecycle.accept(event)
-        if (decision == EventGateDecision.STALE || decision == EventGateDecision.DUPLICATE) { publish(); return }
+        if (decision == EventGateDecision.STALE || decision == EventGateDecision.DUPLICATE) {
+            // 墓碑与门控去重都归为 STALE/DUPLICATE，但成因不同：前者是「这个事件已结束过」，
+            // 后者是「这一报和已收的重复」。分开回报才能定位问题。
+            publish()
+            simulated.onAdmission(event, if (event.isCanceled) "ended" else "tombstoned")
+            return
+        }
         if (!event.isCanceled && newEvent) {
             selectedWarning = event.identity
             _activeWarning.value = event
@@ -165,6 +206,7 @@ class QuakeRepository(
         }
         publish()
         onAlert(event)
+        simulated.onAdmission(event, "applied")
     }
 
     @Synchronized private fun recalculate() {
@@ -256,9 +298,12 @@ class QuakeRepository(
         QuakeCalculator.isSameQuake(a.timestamp, a.latitude, a.longitude, b.timestamp, b.latitude, b.longitude)
     fun refreshCatalog() {
         if (!started) return
-        if (SourceIds.WOLFX in settings.current.enabledSources) source.refreshDirectory()
-        if (SourceIds.PANCAKES in settings.current.enabledSources) pancakes.refreshDirectory()
+        for (src in sources) if (settings.current.enabled(src.id)) src.refreshDirectory()
     }
+
+    /** Jian 登录：用登录密钥 `lk_…` 换取刷新令牌并持久化。 */
+    fun loginJian(loginKey: String) = jian.login(loginKey)
+
     companion object {
         const val MAX_HISTORY = 200
 

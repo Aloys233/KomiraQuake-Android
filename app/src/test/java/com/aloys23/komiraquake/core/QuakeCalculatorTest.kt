@@ -37,22 +37,6 @@ class QuakeCalculatorTest {
     }
 
     @Test
-    fun wavesInsideChinaAreNotHidden() {
-        // 震中在四川，波前半径远小于到国境最远角点的距离。
-        assertTrue(!QuakeCalculator.bothWavesBeyondChina(30.66, 104.06, 100.0, 80.0))
-    }
-
-    @Test
-    fun wavesAreHiddenOnlyAfterBothLeaveChina() {
-        // P 波仍在中国境内、S 波已超出：不隐藏（避免 P 先消失）。
-        assertTrue(!QuakeCalculator.bothWavesBeyondChina(30.66, 104.06, 100.0, 30000.0))
-        // 两者都已扫过全境：一起隐藏。
-        assertTrue(QuakeCalculator.bothWavesBeyondChina(30.66, 104.06, 30000.0, 25000.0))
-        // 已超出量程记 -1，视为已离开中国。
-        assertTrue(QuakeCalculator.bothWavesBeyondChina(30.66, 104.06, -1.0, -1.0))
-    }
-
-    @Test
     fun sameQuakeMatchesLiveAndCatalogReports() {
         // 2026-09-30 18:31 云南昆明：EEW 与目录发震时刻相同、震中相近。
         val t = 1_700_000_000_000L

@@ -1,6 +1,7 @@
 package com.aloys23.komiraquake.data.source.pancakes
 
 import com.aloys23.komiraquake.core.IntensityStandard
+import com.aloys23.komiraquake.data.source.SourceEventKind
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -22,7 +23,7 @@ class PancakesParserTest {
             ),
             user = null, standard = IntensityStandard.CSIS, now = 1700000000000,
         )!!
-        assertEquals(PancakesKind.LIVE, parsed.kind)
+        assertEquals(SourceEventKind.LIVE, parsed.kind)
         assertEquals("Pancakes", parsed.event.sourceProvider)
         assertEquals("USGS", parsed.event.sourceAgency)
         assertEquals("usgs:us7000abcd", parsed.event.eventId)
@@ -40,7 +41,7 @@ class PancakesParserTest {
             ),
             user = null, standard = IntensityStandard.CSIS, now = 1700000000000,
         )!!
-        assertEquals(PancakesKind.LIVE, parsed.kind)
+        assertEquals(SourceEventKind.LIVE, parsed.kind)
         assertEquals("GQ", parsed.event.sourceAgency)
         assertEquals("gq:a1b2", parsed.event.eventId)
         assertTrue(parsed.event.isFinal)
@@ -66,7 +67,7 @@ class PancakesParserTest {
             ),
             user = null, standard = IntensityStandard.JMA, now = 1700000000000,
         )!!
-        assertEquals(PancakesKind.LIVE, parsed.kind)
+        assertEquals(SourceEventKind.LIVE, parsed.kind)
         assertEquals("JMA", parsed.event.sourceAgency)
         assertEquals("jma_eew:20231114221320", parsed.event.eventId)
         assertEquals(4, parsed.event.reportNum)
@@ -85,7 +86,7 @@ class PancakesParserTest {
             ),
             user = null, standard = IntensityStandard.CSIS, now = 1700000000000,
         )!!
-        assertEquals(PancakesKind.DIRECTORY, parsed.kind)
+        assertEquals(SourceEventKind.DIRECTORY, parsed.kind)
         assertEquals("jma_eqlist:20231114221320", parsed.event.eventId)
         assertTrue(parsed.event.isFinal)
         assertFalse(parsed.event.isCanceled)

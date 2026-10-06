@@ -69,7 +69,8 @@ class AppThemeTest {
         for (dark in listOf(false, true)) {
             val tint = AppSurfaces.backdropTint(dark)
             val surface = AppSurfaces.surfaceContainer(dark)
-            assertEquals(if (dark) 0.60f else 0.68f, tint.alpha, 0.005f)
+            // 与桌面端 Theme.qml 的 backdropTint 对齐（#80→0.50 / #94→0.58）。
+            assertEquals(if (dark) 0.50f else 0.58f, tint.alpha, 0.005f)
             assertEquals(surface, tint.copy(alpha = 1f))
             assertEquals(1f, surface.alpha)
         }

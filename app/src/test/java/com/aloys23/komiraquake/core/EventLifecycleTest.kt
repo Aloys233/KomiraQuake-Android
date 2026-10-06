@@ -29,6 +29,34 @@ class EventLifecycleTest {
         assertTrue(reducer.events.isEmpty())
         assertEquals(EventGateDecision.STALE, reducer.accept(final.copy(reportNum = 3)))
     }
+    // 跨聚合商的同一份 JMA EEW 报文：identity 不含 provider，二者落进同一会话；
+    // 同报次现任优先（不抖动），更高报次由另一路接管（互为备份）。
+    @Test fun crossSourceLiveReportsMergeIntoOneSession() {
+        val reducer = EventLifecycle({ clock })
+        val wolfx = event().copy(
+            sourceProvider = "Wolfx", sourceAgency = "JMA",
+            eventId = "jma_eew:20261005223109", reportNum = 4, magnitude = 4.6,
+        )
+        val pancakes = wolfx.copy(sourceProvider = "Pancakes", magnitude = 4.7)
+        assertEquals(wolfx.identity, pancakes.identity)
+
+        assertEquals(EventGateDecision.PASS, reducer.accept(wolfx))
+        // 同报次的另一聚合商：现任优先 → DUPLICATE，不覆盖、不新增。
+        assertEquals(EventGateDecision.DUPLICATE, reducer.accept(pancakes))
+        assertEquals(1, reducer.events.size)
+        assertEquals(4.6, reducer.events.single().magnitude, 0.0)
+        // 更高报次由另一路接管。
+        val newer = pancakes.copy(reportNum = 5, magnitude = 4.8)
+        assertEquals(EventGateDecision.PASS, reducer.accept(newer))
+        assertEquals(1, reducer.events.size)
+        assertEquals(4.8, reducer.events.single().magnitude, 0.0)
+        assertEquals("Pancakes", reducer.events.single().sourceProvider)
+        // 任一路取消 → 合并键终止，另一路后续报文被挡住、不复活。
+        reducer.accept(newer.copy(isCanceled = true))
+        assertTrue(reducer.events.isEmpty())
+        assertEquals(EventGateDecision.STALE, reducer.accept(wolfx.copy(reportNum = 6)))
+    }
+
     @Test fun cancellationAndStopAreIsolatedByAgencyAndIdentity() {
         val reducer = EventLifecycle({ clock })
         val a = event(); val b = event().copy(sourceAgency = "JMA")
@@ -75,6 +103,66 @@ class EventLifecycleTest {
         clock++
         assertEquals(listOf(a), reducer.expire())
     }
+
+    /**
+     * 发震时刻超出现在 +60s 的帧判过期丢弃。这条守卫是模拟源能安全工作的前提：
+     * 服务端把发震时刻钳到 +55s 就是为了留余量，否则「未来到时」的提醒会挂起。
+     * 桌面端 `EarthquakeEvent::expired()` 已补齐同一规则。
+     */
+    @Test fun futureOriginIsRejected() {
+        val reducer = EventLifecycle({ clock })
+        val base = event()
+        assertEquals(EventGateDecision.PASS, reducer.accept(base))
+        // +60s 之内的未来时刻仍放行。
+        val soon = base.copy(eventId = "B", id = "B", reportNum = 1, timestamp = clock + 55_000L)
+        assertEquals(EventGateDecision.PASS, reducer.accept(soon))
+        // 超 +60s：判过期，且不进入活动事件。
+        val future = base.copy(eventId = "C", id = "C", reportNum = 1, timestamp = clock + 5 * 60_000L)
+        assertEquals(EventGateDecision.STALE, reducer.accept(future))
+        assertFalse(reducer.events.any { it.identity == future.identity })
+    }
+
+    /**
+     * 机构 SIM 的模拟报文与真实报文必须并存：合并键是 `sourceAgency|eventId`，
+     * 撞键会让模拟数据静默覆盖真实预警。
+     */
+    @Test fun simulatedAgencyNeverCollidesWithRealSources() {
+        val reducer = EventLifecycle({ clock })
+        val cenc = event().copy(sourceAgency = "CENC", eventId = "CD.1", id = "wolfx_CD.1")
+        val sim = event().copy(
+            sourceAgency = "SIM", sourceProvider = "Simulated",
+            eventId = "sim-1-a", id = "sim_sim-1-a",
+        )
+        assertNotEquals(cenc.identity, sim.identity)
+        assertEquals(EventGateDecision.PASS, reducer.accept(cenc))
+        assertEquals(EventGateDecision.PASS, reducer.accept(sim))
+        assertEquals(2, reducer.events.size)
+        // 反向对照：同机构同 id 确实合并（证明差异来自机构而非巧合）。
+        assertEquals(
+            cenc.identity,
+            cenc.copy(sourceProvider = "Pancakes", id = "pancakes_CD.1").identity,
+        )
+    }
+
+    /** 同 id 重放落在墓碑窗口内被压制：模拟源「新一轮」铸新 id 正是为此。 */
+    @Test fun reusedSimulatedEventIdIsSuppressedByTombstone() {
+        val reducer = EventLifecycle({ clock })
+        val sim = event().copy(
+            sourceAgency = "SIM", sourceProvider = "Simulated",
+            eventId = "sim-1-a", id = "sim_sim-1-a", isCanceled = true,
+        )
+        // 取消报即写入终态墓碑。
+        reducer.accept(sim)
+        assertTrue(reducer.events.isEmpty())
+        // 同一 id 换一报再来：不得重开已结束的提醒。
+        val replay = sim.copy(isCanceled = false, reportNum = 2)
+        assertEquals(EventGateDecision.STALE, reducer.accept(replay))
+        assertTrue(reducer.events.isEmpty())
+        // 换新 id 则照常生效。
+        val fresh = sim.copy(isCanceled = false, eventId = "sim-2-b", id = "sim_sim-2-b")
+        assertEquals(EventGateDecision.PASS, reducer.accept(fresh))
+        assertEquals(1, reducer.events.size)
+    }
     @Test fun warningRequiresMasterSwitchAndLocalIntensityOnly() {
         // 预警总开关默认关闭：任何事件都不提醒。
         val off = com.aloys23.komiraquake.data.prefs.Settings()
@@ -109,7 +197,10 @@ class EventLifecycleTest {
                 sWaveArrival = clock + 60_000)))
         }
         assertEquals(EventGateDecision.PASS, recovered.accept(stopped.copy(sourceAgency = "JMA")))
-        assertEquals(EventGateDecision.PASS, recovered.accept(stopped.copy(sourceProvider = "Other")))
+        // 不同 eventId 仍是独立身份，不被 tombstone 影响。
+        assertEquals(EventGateDecision.PASS, recovered.accept(stopped.copy(eventId = "stop-other")))
+        // 仅换聚合商（agency + eventId 相同）是同一身份：仍被 tombstone 挡住（跨源合并语义）。
+        assertEquals(EventGateDecision.STALE, recovered.accept(stopped.copy(sourceProvider = "Pancakes")))
     }
 
     @Test fun restoredTombstonesExpireButOldOriginRemainsRejected() {

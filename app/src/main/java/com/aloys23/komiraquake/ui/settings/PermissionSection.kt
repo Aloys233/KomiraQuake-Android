@@ -32,8 +32,11 @@ import com.aloys23.komiraquake.service.RootHardening
 import com.aloys23.komiraquake.service.SystemPermissions
 import com.aloys23.komiraquake.service.WarningService
 import com.aloys23.komiraquake.ui.components.Label
+import com.aloys23.komiraquake.ui.components.AppCard
 import com.aloys23.komiraquake.ui.components.AppIcon
+import com.aloys23.komiraquake.ui.components.AppSwitchRow
 import com.aloys23.komiraquake.ui.components.LucideIcon
+import com.aloys23.komiraquake.ui.components.SectionHeader
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.ui.semantics.Role
 import com.aloys23.komiraquake.ui.theme.AppSurfaces
@@ -77,8 +80,8 @@ internal fun PermissionSection(
     var rootBusy by remember { mutableStateOf(false) }
 
     Column(modifier = modifier) {
-        SectionTitle("权限与后台运行", dark)
-        Card(dark) {
+        SectionHeader("权限与后台运行", dark)
+        AppCard(dark) {
             PermissionRow(
                 title = "通知权限",
                 summary = "预警通知与全屏弹出的前提",
@@ -152,20 +155,18 @@ internal fun PermissionSection(
         }
 
         Spacer(Modifier.height(14.dp))
-        SectionTitle("后台运行", dark)
-        Card(dark) {
-            SwitchRow("后台保活服务", settings.enableBackgroundGuard, dark) { checked ->
-                onUpdate { it.copy(enableBackgroundGuard = checked) }
-            }
+        SectionHeader("后台运行", dark)
+        AppCard(dark) {
+            AppSwitchRow("后台保活服务", settings.enableBackgroundGuard, dark,
+                onChange = { checked -> onUpdate { it.copy(enableBackgroundGuard = checked) } })
             Label(
                 "常驻前台服务以维持 WS 实时预警链路；可随时关闭",
                 AppSurfaces.outline(dark),
                 size = 11.sp,
             )
             Spacer(Modifier.height(6.dp))
-            SwitchRow("预警时绕过勿扰", settings.enableDndBypass, dark) { checked ->
-                onUpdate { it.copy(enableDndBypass = checked) }
-            }
+            AppSwitchRow("预警时绕过勿扰", settings.enableDndBypass, dark,
+                onChange = { checked -> onUpdate { it.copy(enableDndBypass = checked) } })
             Label(
                 "需先授予「通知策略访问」；预警结束自动恢复原勿扰状态",
                 AppSurfaces.outline(dark),
