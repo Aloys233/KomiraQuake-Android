@@ -2,14 +2,18 @@ package com.aloys23.komiraquake
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.core.content.ContextCompat
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aloys23.komiraquake.ui.QuakeApp
 import com.aloys23.komiraquake.ui.theme.KomiraTheme
@@ -45,13 +49,36 @@ class MainActivity : ComponentActivity() {
 
         val container = (application as KomiraApp).container
 
+        // 全屏沉浸：内容铺到系统栏之下，系统栏透明、图标明暗随主题。
+        val systemDark = (resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+            Configuration.UI_MODE_NIGHT_YES
+        applyEdgeToEdge(resolveDarkTheme(container.settings.current.themeMode, systemDark))
+
         setContent {
             val settings by container.settings.state.collectAsStateWithLifecycle()
             val dark = resolveDarkTheme(settings.themeMode, isSystemInDarkTheme())
+            LaunchedEffect(dark) { applyEdgeToEdge(dark) }
             KomiraTheme(darkTheme = dark) {
                 QuakeApp(container = container)
             }
         }
+    }
+
+    /** Transparent system bars with icon contrast matched to [dark]; no navigation-bar scrim. */
+    private fun applyEdgeToEdge(dark: Boolean) {
+        val transparent = android.graphics.Color.TRANSPARENT
+        enableEdgeToEdge(
+            statusBarStyle = if (dark) {
+                SystemBarStyle.dark(transparent)
+            } else {
+                SystemBarStyle.light(transparent, transparent)
+            },
+            navigationBarStyle = if (dark) {
+                SystemBarStyle.dark(transparent)
+            } else {
+                SystemBarStyle.light(transparent, transparent)
+            },
+        )
     }
 
     private fun requestRuntimePermissions() {

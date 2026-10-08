@@ -14,10 +14,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
-import com.aloys23.komiraquake.ui.theme.AppSurfaces
 import top.yukonga.miuix.kmp.blur.LayerBackdrop
 import top.yukonga.miuix.kmp.blur.blur
 import top.yukonga.miuix.kmp.blur.drawBackdrop
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /** One source owned by QuakeApp. Never attach layerBackdrop to a glass consumer. */
 @Stable
@@ -40,17 +40,19 @@ fun canUseMapBlur(enabled: Boolean, hardwareAccelerated: Boolean, shaderSupporte
 @Composable
 fun Modifier.mapGlass(dark: Boolean, shape: Shape = RoundedCornerShape(20.dp)): Modifier {
     val glass = LocalMapGlass.current
-    val surface = AppSurfaces.surfaceContainer(dark)
+    val scheme = MiuixTheme.colorScheme
+    val surface = scheme.surfaceContainer
+    val tint = scheme.surfaceContainer.copy(alpha = if (dark) 0.50f else 0.58f)
     val radius = with(LocalDensity.current) { 20.dp.toPx() }
     val backdropModifier = if (glass != null && glass.enabled && glass.sourceReady) {
         Modifier.drawBackdrop(
             backdrop = glass.backdrop,
             shape = { shape },
             effects = { blur(radiusX = radius, radiusY = radius) },
-        ).background(AppSurfaces.backdropTint(dark), shape)
+        ).background(tint, shape)
     } else {
         Modifier.background(surface, shape)
     }
     return this.clip(shape).then(backdropModifier)
-        .border(1.dp, AppSurfaces.outlineVariant(dark).copy(alpha = 0.75f), shape)
+        .border(1.dp, scheme.dividerLine.copy(alpha = 0.75f), shape)
 }

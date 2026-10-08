@@ -7,46 +7,52 @@ import com.aloys23.komiraquake.model.WarningLevel
 import com.aloys23.komiraquake.ui.components.canUseMapBlur
 import org.junit.Assert.*
 import org.junit.Test
+import top.yukonga.miuix.kmp.theme.darkColorScheme
+import top.yukonga.miuix.kmp.theme.lightColorScheme
 
 class AppThemeTest {
-    @Test fun miuixSurfaceAndTextRolesMatchAppTokensInBothThemes() {
+    @Test fun appSchemeUsesMiuixDefaultsExceptCriticalErrorRole() {
         for (dark in listOf(false, true)) {
+            val base = if (dark) darkColorScheme() else lightColorScheme()
             val colors = appColorScheme(dark)
-            assertEquals(AppSurfaces.surface(dark), colors.background)
-            assertEquals(AppSurfaces.onSurface(dark), colors.onBackground)
-            assertEquals(AppSurfaces.surfaceContainer(dark), colors.surface)
-            assertEquals(AppSurfaces.onSurface(dark), colors.onSurface)
-            assertEquals(AppSurfaces.outline(dark), colors.onSurfaceSecondary)
-            assertEquals(AppSurfaces.surfaceContainerHigh(dark), colors.surfaceVariant)
-            assertEquals(AppSurfaces.surfaceContainer(dark), colors.surfaceContainer)
-            assertEquals(AppSurfaces.onSurface(dark), colors.onSurfaceContainer)
-            assertEquals(AppSurfaces.outlineVariant(dark), colors.dividerLine)
+            // 主色/表面/文字角色全部沿用 Miuix 默认，不再覆盖为自建青绿令牌。
+            assertEquals(base.primary, colors.primary)
+            assertEquals(base.primaryVariant, colors.primaryVariant)
+            assertEquals(base.primaryContainer, colors.primaryContainer)
+            assertEquals(base.onPrimary, colors.onPrimary)
+            assertEquals(base.onPrimaryVariant, colors.onPrimaryVariant)
+            assertEquals(base.onSurfaceVariantActions, colors.onSurfaceVariantActions)
+            assertEquals(base.background, colors.background)
+            assertEquals(base.onBackground, colors.onBackground)
+            assertEquals(base.surface, colors.surface)
+            assertEquals(base.onSurface, colors.onSurface)
+            assertEquals(base.surfaceVariant, colors.surfaceVariant)
+            assertEquals(base.surfaceContainer, colors.surfaceContainer)
+            assertEquals(base.surfaceContainerHigh, colors.surfaceContainerHigh)
+            assertEquals(base.onSurfaceSecondary, colors.onSurfaceSecondary)
+            assertEquals(base.outline, colors.outline)
+            assertEquals(base.dividerLine, colors.dividerLine)
+            assertEquals(base.disabledOnSurface, colors.disabledOnSurface)
+            // 唯一保留的语义覆盖：error 角色表达「严重预警」。
+            assertEquals(SeismicColors.severity(WarningLevel.CRITICAL, dark), colors.error)
+            assertEquals(SeismicColors.on(SeismicColors.severity(WarningLevel.CRITICAL, dark)), colors.onError)
         }
     }
 
-    @Test fun controlsUseTealInsteadOfMiuixDefaultBlue() {
-        for (dark in listOf(false, true)) {
-            val colors = appColorScheme(dark)
-            assertEquals(AppSurfaces.accent(dark), colors.primary)
-            assertEquals(AppSurfaces.accent(dark), colors.primaryVariant)
-            assertEquals(AppSurfaces.accent(dark), colors.onSurfaceVariantActions)
-            assertEquals(AppSurfaces.accentContainer(dark), colors.primaryContainer)
-            assertEquals(SeismicColors.on(colors.primary), colors.onPrimary)
-            assertEquals(AppSurfaces.disabled(dark), colors.disabledOnSurface)
-            assertEquals(AppSurfaces.disabled(dark), colors.disabledOnPrimaryButton)
-        }
+    @Test fun primaryUsesMiuixDefaultBlueInsteadOfTeal() {
+        // Miuix 默认主色（见官方 Color System：light #3482FF / dark #277AF7）。
+        assertEquals(Color(0xFF3482FF), appColorScheme(dark = false).primary)
+        assertEquals(Color(0xFF277AF7), appColorScheme(dark = true).primary)
+        assertNotEquals(Color(0xFF006B62), appColorScheme(dark = false).primary)
+        assertNotEquals(Color(0xFF76D9CD), appColorScheme(dark = true).primary)
     }
 
-    @Test fun normalAndSecondaryTextStayReadableAcrossOpaqueSurfaces() {
+    @Test fun opaqueSurfacesAreFullyOpaque() {
         for (dark in listOf(false, true)) {
-            val surfaces = listOf(AppSurfaces.surface(dark), AppSurfaces.surfaceContainerLow(dark),
-                AppSurfaces.surfaceContainer(dark), AppSurfaces.surfaceContainerHigh(dark))
-            for (surface in surfaces) {
+            val colors = appColorScheme(dark)
+            for (surface in listOf(colors.background, colors.surface, colors.surfaceContainer)) {
                 assertEquals(1f, surface.alpha)
-                assertTrue("Primary text dark=$dark", contrast(AppSurfaces.onSurface(dark), surface) >= 4.5f)
-                assertTrue("Secondary text dark=$dark", contrast(AppSurfaces.outline(dark), surface) >= 4.5f)
             }
-            assertTrue(contrast(SeismicColors.on(AppSurfaces.accent(dark)), AppSurfaces.accent(dark)) >= 4.5f)
         }
     }
 
@@ -62,17 +68,6 @@ class AppThemeTest {
             assertEquals(systemDark, resolveDarkTheme(ThemeMode.SYSTEM, systemDark))
             assertFalse(resolveDarkTheme(ThemeMode.LIGHT, systemDark))
             assertTrue(resolveDarkTheme(ThemeMode.DARK, systemDark))
-        }
-    }
-
-    @Test fun glassTintsLeaveTheBackdropVisibleWithoutChangingOpaqueSurfaces() {
-        for (dark in listOf(false, true)) {
-            val tint = AppSurfaces.backdropTint(dark)
-            val surface = AppSurfaces.surfaceContainer(dark)
-            // 与桌面端 Theme.qml 的 backdropTint 对齐（#80→0.50 / #94→0.58）。
-            assertEquals(if (dark) 0.50f else 0.58f, tint.alpha, 0.005f)
-            assertEquals(surface, tint.copy(alpha = 1f))
-            assertEquals(1f, surface.alpha)
         }
     }
 

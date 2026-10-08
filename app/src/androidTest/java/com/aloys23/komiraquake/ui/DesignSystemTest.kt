@@ -6,10 +6,13 @@ import android.view.ContextThemeWrapper
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.unit.Density
@@ -20,12 +23,15 @@ import com.aloys23.komiraquake.data.prefs.SettingsStore
 import com.aloys23.komiraquake.model.EarthquakeEvent
 import com.aloys23.komiraquake.model.WarningLevel
 import com.aloys23.komiraquake.ui.components.*
-import com.aloys23.komiraquake.ui.theme.AppSurfaces
 import com.aloys23.komiraquake.ui.theme.KomiraTheme
 import com.aloys23.komiraquake.ui.theme.LocalAppDark
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
+import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.preference.SwitchPreference
+import top.yukonga.miuix.kmp.theme.darkColorScheme
+import top.yukonga.miuix.kmp.theme.lightColorScheme
 
 /** Synthetic UI only; IsolatedTestRunner never starts production feeds or warnings. */
 class DesignSystemTest {
@@ -36,8 +42,14 @@ class DesignSystemTest {
         compose.setContent {
             KomiraTheme(false) {
                 Row {
-                    AppIconButton(AppIcon.Plus, "放大地图", false, { calls++ }, enabled = false)
-                    AppIconButton(AppIcon.Locate, "定位到我的位置", false, { calls++ })
+                    IconButton(onClick = { calls++ }, enabled = false,
+                        modifier = Modifier.semantics { contentDescription = "放大地图" }) {
+                        LucideIcon(AppIcon.Plus, Color.Black)
+                    }
+                    IconButton(onClick = { calls++ },
+                        modifier = Modifier.semantics { contentDescription = "定位到我的位置" }) {
+                        LucideIcon(AppIcon.Locate, Color.Black)
+                    }
                 }
             }
         }
@@ -49,7 +61,7 @@ class DesignSystemTest {
     @Test fun allLucideResourcesLoadThroughTheStandardTintedWrapper() {
         compose.setContent {
             KomiraTheme(false) {
-                FlowRow { AppIcon.entries.forEach { LucideIcon(it, AppSurfaces.onSurface(false), it.name) } }
+                FlowRow { AppIcon.entries.forEach { LucideIcon(it, lightColorScheme().onSurface, it.name) } }
             }
         }
         AppIcon.entries.forEach { compose.onNodeWithContentDescription(it.name).assertExists() }
@@ -61,8 +73,13 @@ class DesignSystemTest {
             val density = LocalDensity.current.density
             CompositionLocalProvider(LocalDensity provides Density(density, 2f)) {
                 KomiraTheme(false) {
-                    Box(Modifier.width(320.dp)) {
-                        AppSwitchRow("背景模糊", checked, false, { checked = it }, "仅模糊地图背景，不影响文字与减少动态效果设置")
+                    Box(Modifier.width(320.dp).semantics(mergeDescendants = true) { contentDescription = "背景模糊" }) {
+                        SwitchPreference(
+                            title = "背景模糊",
+                            summary = "仅模糊地图背景，不影响文字与减少动态效果设置",
+                            checked = checked,
+                            onCheckedChange = { checked = it },
+                        )
                     }
                 }
             }
@@ -102,7 +119,7 @@ class DesignSystemTest {
         }
         compose.runOnIdle { assertEquals(false, darkSeen) }
         val pixel = compose.onNodeWithTag("warning").captureToImage().toPixelMap()[0, 0]
-        assertEquals(AppSurfaces.surface(false).toArgb(), pixel.toArgb())
+        assertEquals(lightColorScheme().background.toArgb(), pixel.toArgb())
         compose.onNodeWithText("本地到时未知").assertExists()
     }
 
@@ -114,7 +131,8 @@ class DesignSystemTest {
         for (mode in listOf(false, true)) {
             compose.runOnIdle { dark = mode }
             val pixel = compose.onNodeWithTag("fallback").captureToImage().toPixelMap()[40, 40]
-            assertEquals(AppSurfaces.surfaceContainer(mode).toArgb(), pixel.toArgb())
+            val expected = if (mode) darkColorScheme().surfaceContainer else lightColorScheme().surfaceContainer
+            assertEquals(expected.toArgb(), pixel.toArgb())
         }
     }
 
@@ -142,9 +160,10 @@ class DesignSystemTest {
                     if (dark) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO
             }
             val context = base.createConfigurationContext(configuration)
+            val expected = if (dark) darkColorScheme().background else lightColorScheme().background
             for (theme in listOf(R.style.Theme_KomiraQuake, R.style.Theme_KomiraQuake_Warning)) {
                 val attrs = ContextThemeWrapper(context, theme).obtainStyledAttributes(intArrayOf(android.R.attr.windowBackground))
-                try { assertEquals(AppSurfaces.surface(dark).toArgb(), attrs.getColor(0, 0)) }
+                try { assertEquals(expected.toArgb(), attrs.getColor(0, 0)) }
                 finally { attrs.recycle() }
             }
         }

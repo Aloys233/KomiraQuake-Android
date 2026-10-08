@@ -6,15 +6,21 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -25,28 +31,30 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aloys23.komiraquake.core.ClockInfo
 import com.aloys23.komiraquake.data.prefs.Settings
 import com.aloys23.komiraquake.model.DataSourceInfo
 import com.aloys23.komiraquake.service.LocationState
-import com.aloys23.komiraquake.ui.components.AppButton
-import com.aloys23.komiraquake.ui.components.AppCard
 import com.aloys23.komiraquake.ui.components.AppIcon
-import com.aloys23.komiraquake.ui.components.AppTabRow
 import com.aloys23.komiraquake.ui.components.Label
 import com.aloys23.komiraquake.ui.components.LucideIcon
-import com.aloys23.komiraquake.ui.components.PageHeader
 import com.aloys23.komiraquake.ui.settings.sections.AppearanceSection
 import com.aloys23.komiraquake.ui.settings.sections.LocationSection
 import com.aloys23.komiraquake.ui.settings.sections.SourceSection
 import com.aloys23.komiraquake.ui.settings.sections.SystemSection
 import com.aloys23.komiraquake.ui.settings.sections.WarningSection
-import com.aloys23.komiraquake.ui.theme.AppSurfaces
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.TabRow
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 private val SETTINGS_TABS = listOf("预警提醒", "定位", "外观", "数据源", "系统")
 
@@ -71,32 +79,48 @@ fun SettingsScreen(
     onResetDefaults: () -> Unit,
     /** 系统返回键的最终出口：当前 Tab 不是第一个时先回到第一个 Tab，否则退出设置页。 */
     onExit: () -> Unit,
+    /** 是否为当前可见页：常驻 Pager 中不可见时不能拦截返回键。 */
+    active: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     var tab by rememberSaveable { mutableIntStateOf(0) }
     var confirmReset by remember { mutableStateOf(false) }
+    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
-    BackHandler(enabled = true) {
+    BackHandler(enabled = active) {
         if (tab != 0) tab = 0 else onExit()
     }
 
     Box(
-        modifier.fillMaxSize().background(AppSurfaces.surface(dark)),
+        modifier.fillMaxSize().background(MiuixTheme.colorScheme.background),
         contentAlignment = Alignment.TopCenter,
     ) {
         Column(
-            Modifier.widthIn(max = 760.dp).fillMaxSize(),
+            Modifier.widthIn(max = 760.dp).fillMaxSize().statusBarsPadding(),
         ) {
-            PageHeader("设置", "定位、预警与显示偏好", AppIcon.Settings, dark)
-            AppTabRow(
-                tabs = SETTINGS_TABS, selectedIndex = tab, onSelect = { tab = it }, dark = dark,
+            Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                LucideIcon(AppIcon.Settings, MiuixTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
+                Column(Modifier.weight(1f)) {
+                    Label("设置", MiuixTheme.colorScheme.onSurface, 26.sp, bold = true,
+                        modifier = Modifier.semantics { heading() })
+                    Label("定位、预警与显示偏好", MiuixTheme.colorScheme.onSurfaceSecondary, 13.sp)
+                }
+            }
+            TabRow(
+                tabs = SETTINGS_TABS, selectedTabIndex = tab, onTabSelected = { tab = it },
+                modifier = Modifier.padding(horizontal = 16.dp),
             )
             Spacer(Modifier.height(8.dp))
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                 horizontalArrangement = Arrangement.End,
             ) {
-                AppButton("恢复默认", dark, { confirmReset = true }, icon = AppIcon.Refresh)
+                Button(onClick = { confirmReset = true }) {
+                    LucideIcon(AppIcon.Refresh, MiuixTheme.colorScheme.primary)
+                    Spacer(Modifier.width(8.dp))
+                    Text("恢复默认", style = MiuixTheme.textStyles.button)
+                }
             }
 
             Column(
@@ -125,33 +149,43 @@ fun SettingsScreen(
                         onUpdate = onUpdate, onRefreshClock = onRefreshClock,
                     )
                 }
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(96.dp + navBottom))
             }
         }
     }
 
     if (confirmReset) {
-        // 项目未引入 material3，且全项目控件都基于 AppSurfaces 自建，这里手搓弹层保持一致。
         Box(
             Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.48f))
                 .clickable(role = Role.Button, onClickLabel = "关闭") { confirmReset = false },
             contentAlignment = Alignment.Center,
         ) {
-            AppCard(dark, Modifier.widthIn(max = 420.dp).padding(24.dp).clickable(enabled = false) {}) {
-                Label("恢复默认设置？", AppSurfaces.onSurface(dark), 18.sp, bold = true)
+            Card(
+                Modifier.widthIn(max = 420.dp).padding(24.dp).clickable(enabled = false) {},
+                insideMargin = PaddingValues(16.dp),
+            ) {
+                Label("恢复默认设置？", MiuixTheme.colorScheme.onSurface, 18.sp, bold = true)
                 Spacer(Modifier.height(8.dp))
                 Label(
                     "外观、地图、预警和声音等偏好都将重置为初始值。此操作无法撤销。",
-                    AppSurfaces.outline(dark), 13.sp,
+                    MiuixTheme.colorScheme.onSurfaceSecondary, 13.sp,
                 )
                 Spacer(Modifier.height(18.dp))
                 Row(
                     Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    AppButton("取消", dark, { confirmReset = false }, Modifier.weight(1f))
-                    AppButton("恢复默认", dark, {
-                        onResetDefaults(); confirmReset = false
-                    }, Modifier.weight(1f), icon = AppIcon.Refresh, primary = true)
+                    Button(onClick = { confirmReset = false }, modifier = Modifier.weight(1f)) {
+                        Text("取消", style = MiuixTheme.textStyles.button)
+                    }
+                    Button(
+                        onClick = { onResetDefaults(); confirmReset = false },
+                        colors = ButtonDefaults.buttonColorsPrimary(),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        LucideIcon(AppIcon.Refresh, MiuixTheme.colorScheme.onPrimary)
+                        Spacer(Modifier.width(8.dp))
+                        Text("恢复默认", style = MiuixTheme.textStyles.button)
+                    }
                 }
             }
         }

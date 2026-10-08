@@ -18,6 +18,7 @@ class TileLoader(private val client: OkHttpClient) {
 
     // 按字节数计容量（约 64 MB），兼容 256² 与 512² 瓦片：
     // 256² ARGB_8888 约 256 KB/张 → 256 张；Petal 的 512² 约 1 MB/张 → 64 张。
+    // 位图计在 Java 堆上，保持克制；长期留存交给磁盘缓存。
     private val cache = object : LruCache<String, ImageBitmap>(64 * 1024 * 1024) {
         override fun sizeOf(key: String, value: ImageBitmap): Int = value.width * value.height * 4
     }

@@ -8,7 +8,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.isSystemInDarkTheme
-import com.aloys23.komiraquake.ui.theme.AppSurfaces
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -26,6 +25,7 @@ import com.aloys23.komiraquake.ui.theme.KomiraTheme
 import com.aloys23.komiraquake.ui.theme.resolveDarkTheme
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /** Bound to the notification's event identity, never to whichever event is selected later. */
 class WarningActivity : ComponentActivity() {
@@ -80,7 +80,7 @@ class WarningActivity : ComponentActivity() {
                     }
                 }
                 if (warning != null && !warning.isCanceled) {
-                    Box(modifier = Modifier.fillMaxSize().background(AppSurfaces.surface(dark))) {
+                    Box(modifier = Modifier.fillMaxSize().background(MiuixTheme.colorScheme.background)) {
                         WarningOverlay(
                             event = warning,
                             dark = dark,

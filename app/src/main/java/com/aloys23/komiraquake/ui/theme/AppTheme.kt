@@ -2,27 +2,30 @@ package com.aloys23.komiraquake.ui.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
-import com.aloys23.komiraquake.data.prefs.ThemeMode
-import com.aloys23.komiraquake.model.WarningLevel
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import com.aloys23.komiraquake.R
+import com.aloys23.komiraquake.data.prefs.ThemeMode
+import com.aloys23.komiraquake.model.WarningLevel
 import top.yukonga.miuix.kmp.theme.Colors
-import top.yukonga.miuix.kmp.theme.TextStyles
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+import top.yukonga.miuix.kmp.theme.TextStyles
 import top.yukonga.miuix.kmp.theme.darkColorScheme
 import top.yukonga.miuix.kmp.theme.lightColorScheme
 import kotlin.math.roundToInt
 
-/** 语义配色令牌。《NATIVE_PORT_SPEC》 §9。 */
+/**
+ * 科学语义色：预警级别、烈度色阶、P/S 波与校时状态。《NATIVE_PORT_SPEC》 §9。
+ * 这里只保留“数据含义”的固定色，不再包含品牌强调色——强调色统一由 Miuix 主题提供。
+ */
 object SeismicColors {
     val P_WAVE = Color(0xFF0288D1)
     val S_WAVE = Color(0xFFE65100)
@@ -39,8 +42,6 @@ object SeismicColors {
     private val warningDark = Color(0xFFFF8C66)
     private val criticalLight = Color(0xFFBA1A1A)
     private val criticalDark = Color(0xFFFFB4AB)
-
-    fun accent(dark: Boolean): Color = if (dark) normalDark else normalLight
 
     fun severity(level: WarningLevel, dark: Boolean): Color = when (level) {
         WarningLevel.NORMAL -> if (dark) normalDark else normalLight
@@ -99,20 +100,14 @@ object SeismicColors {
     fun on(bg: Color): Color = if (bg.luminance() < 0.179f) Color.White else Color(0xFF1A1C1E)
 }
 
-/** Neutral, opaque surfaces. Translucency is only applied by the map glass wrapper. */
-object AppSurfaces {
-    fun surface(dark: Boolean) = if (dark) Color(0xFF171B1D) else Color(0xFFF1F3F3)
-    fun surfaceContainerLow(dark: Boolean) = if (dark) Color(0xFF1E2325) else Color(0xFFF8F9F9)
-    fun surfaceContainer(dark: Boolean) = if (dark) Color(0xFF252B2D) else Color(0xFFFFFFFF)
-    fun surfaceContainerHigh(dark: Boolean) = if (dark) Color(0xFF303739) else Color(0xFFE7ECEC)
-    fun onSurface(dark: Boolean) = if (dark) Color(0xFFEBF0EF) else Color(0xFF20292C)
-    fun outline(dark: Boolean) = if (dark) Color(0xFFADB9B9) else Color(0xFF566568)
-    fun outlineVariant(dark: Boolean) = if (dark) Color(0xFF424D50) else Color(0xFFD4DEDE)
-    fun accent(dark: Boolean) = if (dark) Color(0xFF76D9CD) else Color(0xFF006B62)
-    fun accentContainer(dark: Boolean) = if (dark) Color(0xFF234840) else Color(0xFFDDEFEA)
-    fun disabled(dark: Boolean) = if (dark) Color(0xFF829091) else Color(0xFF758285)
-    fun backdropTint(dark: Boolean) = surfaceContainer(dark).copy(alpha = if (dark) 0.50f else 0.58f)
-}
+/**
+ * 预警状态的展示色：正常/守候态（NORMAL）直接用 Miuix 主色，与主题保持一致；
+ * 关注/预警/严重仍用固定语义色。取色走 Miuix 主题，避免再硬编码强调色。
+ */
+@Composable
+fun warningColor(level: WarningLevel, dark: Boolean): Color =
+    if (level == WarningLevel.NORMAL) MiuixTheme.colorScheme.primary
+    else SeismicColors.severity(level, dark)
 
 fun resolveDarkTheme(mode: ThemeMode, systemDark: Boolean): Boolean = when (mode) {
     ThemeMode.SYSTEM -> systemDark
@@ -120,42 +115,16 @@ fun resolveDarkTheme(mode: ThemeMode, systemDark: Boolean): Boolean = when (mode
     ThemeMode.DARK -> true
 }
 
-/** Every Miuix role is deliberately mapped: no blue defaults on switches or inputs. */
+/**
+ * Miuix 标准配色：默认蓝色主色与中性表面，Switch/Slider/Button 等控件均为 Miuix 默认观感。
+ * 仅把 error 语义保留为「严重预警」色，使 Miuix 的 error 角色仍表达 CRITICAL 级别。
+ */
 fun appColorScheme(dark: Boolean): Colors {
     val base = if (dark) darkColorScheme() else lightColorScheme()
-    val accent = AppSurfaces.accent(dark)
-    val ink = AppSurfaces.onSurface(dark)
-    val secondary = AppSurfaces.outline(dark)
-    val card = AppSurfaces.surfaceContainer(dark)
-    val raised = AppSurfaces.surfaceContainerHigh(dark)
-    val disabled = AppSurfaces.disabled(dark)
-    val error = SeismicColors.severity(WarningLevel.CRITICAL, dark)
+    val critical = SeismicColors.severity(WarningLevel.CRITICAL, dark)
     return base.copy(
-        primary = accent, onPrimary = SeismicColors.on(accent),
-        primaryVariant = accent, onPrimaryVariant = SeismicColors.on(accent),
-        primaryContainer = AppSurfaces.accentContainer(dark), onPrimaryContainer = accent,
-        error = error, onError = SeismicColors.on(error),
-        errorContainer = raised, onErrorContainer = error,
-        disabledPrimary = raised, disabledOnPrimary = disabled,
-        disabledPrimaryButton = raised, disabledOnPrimaryButton = disabled,
-        disabledPrimarySlider = disabled,
-        secondary = raised, onSecondary = ink,
-        secondaryVariant = raised, onSecondaryVariant = ink,
-        disabledSecondary = raised, disabledOnSecondary = disabled,
-        disabledSecondaryVariant = raised, disabledOnSecondaryVariant = disabled,
-        secondaryContainer = raised, onSecondaryContainer = ink,
-        secondaryContainerVariant = raised, onSecondaryContainerVariant = secondary,
-        tertiaryContainer = raised, onTertiaryContainer = ink, tertiaryContainerVariant = raised,
-        background = AppSurfaces.surface(dark), onBackground = ink, onBackgroundVariant = secondary,
-        surface = card, onSurface = ink, surfaceVariant = raised,
-        onSurfaceSecondary = secondary, onSurfaceVariantSummary = secondary,
-        onSurfaceVariantActions = accent, disabledOnSurface = disabled,
-        surfaceContainer = card, onSurfaceContainer = ink, onSurfaceContainerVariant = secondary,
-        surfaceContainerHigh = raised, onSurfaceContainerHigh = ink,
-        surfaceContainerHighest = raised, onSurfaceContainerHighest = ink,
-        outline = AppSurfaces.outlineVariant(dark), dividerLine = AppSurfaces.outlineVariant(dark),
-        windowDimming = Color.Black.copy(alpha = 0.48f),
-        sliderKeyPoint = secondary, sliderKeyPointForeground = SeismicColors.on(accent), sliderBackground = raised,
+        error = critical,
+        onError = SeismicColors.on(critical),
     )
 }
 

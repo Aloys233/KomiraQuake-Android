@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import okhttp3.Cache
+import okhttp3.Dispatcher
 import okhttp3.OkHttpClient
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -57,9 +58,11 @@ class AppContainer(private val context: Context) {
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    /** 瓦片专用客户端：共享连接池，另挂 64 MB 磁盘缓存，重复区域/重启后不再重新下载。 */
+    /** 瓦片专用客户端：共享连接池，另挂 1 GB 磁盘缓存，重复区域/重启后不再重新下载。
+     *  默认 Dispatcher 同主机并发仅 5，会把 TileLoader 的 6 路并发卡在 5；放宽同主机上限。 */
     val tileClient: OkHttpClient = client.newBuilder()
-        .cache(Cache(File(context.cacheDir, "tiles"), 64L * 1024 * 1024))
+        .cache(Cache(File(context.cacheDir, "tiles"), 1024L * 1024 * 1024))
+        .dispatcher(Dispatcher().apply { maxRequests = 64; maxRequestsPerHost = 16 })
         .addNetworkInterceptor(TileCacheInterceptor)
         .build()
 

@@ -5,12 +5,14 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -31,16 +33,17 @@ import com.aloys23.komiraquake.model.ConnectionStatus
 import com.aloys23.komiraquake.model.DataSourceInfo
 import com.aloys23.komiraquake.model.SourceIds
 import com.aloys23.komiraquake.model.WarningLevel
-import com.aloys23.komiraquake.ui.components.AppButton
-import com.aloys23.komiraquake.ui.components.AppCard
 import com.aloys23.komiraquake.ui.components.AppIcon
 import com.aloys23.komiraquake.ui.components.Label
 import com.aloys23.komiraquake.ui.components.LucideIcon
-import com.aloys23.komiraquake.ui.components.SectionHeader
-import com.aloys23.komiraquake.ui.theme.AppSurfaces
-import com.aloys23.komiraquake.ui.theme.SeismicColors
+import com.aloys23.komiraquake.ui.theme.warningColor
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Switch
+import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
  * 「数据源」分区：每个数据源一张独立卡片。
@@ -61,10 +64,10 @@ internal fun SourceSection(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier) {
-        SectionHeader("数据源", dark)
+        SmallTitle("数据源")
         Label(
             "各数据源平级、互为备份；关闭某个源后应用会改用其余源。",
-            AppSurfaces.outline(dark), 12.sp,
+            MiuixTheme.colorScheme.onSurfaceSecondary, 12.sp,
         )
         Spacer(Modifier.height(12.dp))
         sourceInfos.forEach { info ->
@@ -108,12 +111,15 @@ private fun SourceCard(
     onSaveSimulatedUrl: (String) -> Unit,
 ) {
     var expanded by rememberSaveable(info.id) { mutableStateOf(false) }
-    AppCard(dark) {
+    val onSurface = MiuixTheme.colorScheme.onSurface
+    val secondary = MiuixTheme.colorScheme.onSurfaceSecondary
+    val disabled = MiuixTheme.colorScheme.disabledOnSurface
+    Card(insideMargin = PaddingValues(16.dp)) {
         // 标题行：源名 + 开关。开关自己占 48dp 命中区，文字不抢点击。
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Label(
                 info.name,
-                if (enabled) AppSurfaces.onSurface(dark) else AppSurfaces.disabled(dark),
+                if (enabled) onSurface else disabled,
                 15.sp, bold = true,
                 modifier = Modifier.weight(1f),
             )
@@ -129,7 +135,7 @@ private fun SourceCard(
             Spacer(Modifier.size(6.dp))
             Label(
                 info.statusLabel + (info.latencyMs?.let { " · $it ms" } ?: ""),
-                if (enabled) AppSurfaces.onSurface(dark) else AppSurfaces.disabled(dark),
+                if (enabled) onSurface else disabled,
                 12.sp, bold = true,
             )
         }
@@ -143,19 +149,19 @@ private fun SourceCard(
             Spacer(Modifier.size(6.dp))
             Label(
                 directoryStatusText(info),
-                if (enabled) AppSurfaces.outline(dark) else AppSurfaces.disabled(dark),
+                if (enabled) secondary else disabled,
                 11.sp,
                 modifier = Modifier.weight(1f),
             )
             LucideIcon(
                 if (expanded) AppIcon.ChevronDown else AppIcon.ChevronRight,
-                AppSurfaces.outline(dark),
+                secondary,
             )
         }
         AnimatedVisibility(expanded) {
             Label(
                 info.description,
-                AppSurfaces.outline(dark), 11.sp,
+                secondary, 11.sp,
                 modifier = Modifier.padding(top = 6.dp, start = 14.dp),
             )
         }
@@ -165,8 +171,8 @@ private fun SourceCard(
         if (info.id == SourceIds.JIAN &&
             (settings.jianRefreshToken.isBlank() || settings.enabled(SourceIds.JIAN))
         ) {
-            CardDivider(dark)
-            Label("密钥管理", AppSurfaces.onSurface(dark), 13.sp, bold = true)
+            CardDivider()
+            Label("密钥管理", onSurface, 13.sp, bold = true)
             Spacer(Modifier.height(4.dp))
             var jianKey by remember { mutableStateOf("") }
             TextField(
@@ -176,15 +182,18 @@ private fun SourceCard(
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(8.dp))
-            AppButton(
-                "登录", dark,
+            Button(
                 onClick = { onLoginJian(jianKey.trim()); jianKey = "" },
-                icon = AppIcon.Check, enabled = jianKey.isNotBlank(),
-            )
+                enabled = jianKey.isNotBlank(),
+            ) {
+                LucideIcon(AppIcon.Check, MiuixTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("登录", style = MiuixTheme.textStyles.button)
+            }
             Spacer(Modifier.height(6.dp))
             Label(
                 "登录成功后刷新令牌保存在本机，访问令牌由应用自动续取。设备有连接数上限，请避免频繁重连。",
-                AppSurfaces.outline(dark), 11.sp,
+                secondary, 11.sp,
             )
         }
 
@@ -193,8 +202,8 @@ private fun SourceCard(
         if (info.id == SourceIds.WHEWS &&
             (settings.whewsToken.isBlank() || settings.enabled(SourceIds.WHEWS))
         ) {
-            CardDivider(dark)
-            Label("密钥管理", AppSurfaces.onSurface(dark), 13.sp, bold = true)
+            CardDivider()
+            Label("密钥管理", onSurface, 13.sp, bold = true)
             Spacer(Modifier.height(4.dp))
             var whewsToken by remember { mutableStateOf("") }
             TextField(
@@ -204,23 +213,26 @@ private fun SourceCard(
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(8.dp))
-            AppButton(
-                "保存", dark,
+            Button(
                 onClick = { onSaveWhewsToken(whewsToken.trim()); whewsToken = "" },
-                icon = AppIcon.Check, enabled = whewsToken.isNotBlank(),
-            )
+                enabled = whewsToken.isNotBlank(),
+            ) {
+                LucideIcon(AppIcon.Check, MiuixTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("保存", style = MiuixTheme.textStyles.button)
+            }
             Spacer(Modifier.height(6.dp))
             Label(
                 "令牌在 auth.beecld.com 个人中心申请，保存后本机直连，不经第三方。" +
                     "单令牌最多 20 条并发连接，本应用只用 1 条聚合连接。",
-                AppSurfaces.outline(dark), 11.sp,
+                secondary, 11.sp,
             )
         }
 
         // 模拟源（仅开发自测）：填自建服务端的地址。留空即视为未配置，不会连接。
         if (info.id == SourceIds.SIMULATED) {
-            CardDivider(dark)
-            Label("模拟源地址", AppSurfaces.onSurface(dark), 13.sp, bold = true)
+            CardDivider()
+            Label("模拟源地址", onSurface, 13.sp, bold = true)
             Spacer(Modifier.height(4.dp))
             // 以已持久化的值为种子：外部改动（如恢复默认）后重新同步。
             var simUrl by remember(settings.simulatedUrl) { mutableStateOf(settings.simulatedUrl) }
@@ -231,16 +243,19 @@ private fun SourceCard(
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(8.dp))
-            AppButton(
-                "保存", dark,
+            Button(
                 onClick = { onSaveSimulatedUrl(simUrl.trim()) },
-                icon = AppIcon.Check, enabled = simUrl.trim() != settings.simulatedUrl,
-            )
+                enabled = simUrl.trim() != settings.simulatedUrl,
+            ) {
+                LucideIcon(AppIcon.Check, MiuixTheme.colorScheme.primary)
+                Spacer(Modifier.width(8.dp))
+                Text("保存", style = MiuixTheme.textStyles.button)
+            }
             Spacer(Modifier.height(6.dp))
             Label(
                 "报文机构固定为 SIM，不会与真实地震合并。同一地址重放会被终态墓碑压制，" +
                     "请在服务端控制台用「新一轮」换 id。",
-                AppSurfaces.outline(dark), 11.sp,
+                secondary, 11.sp,
             )
         }
     }
@@ -248,11 +263,11 @@ private fun SourceCard(
 
 /** 卡片内的分区细线：把「状态」与「密钥管理」在同一张卡里分开。 */
 @Composable
-private fun CardDivider(dark: Boolean) {
+private fun CardDivider() {
     Spacer(Modifier.height(12.dp))
     Box(
         Modifier.fillMaxWidth().height(1.dp)
-            .background(AppSurfaces.outlineVariant(dark).copy(alpha = 0.6f)),
+            .background(MiuixTheme.colorScheme.dividerLine.copy(alpha = 0.6f)),
     )
     Spacer(Modifier.height(12.dp))
 }
@@ -267,7 +282,7 @@ private fun StatusDot(status: ConnectionStatus, dark: Boolean) {
         ConnectionStatus.ERROR -> WarningLevel.CRITICAL
     }
     Box(
-        Modifier.size(8.dp).clip(CircleShape).background(SeismicColors.severity(level, dark)),
+        Modifier.size(8.dp).clip(CircleShape).background(warningColor(level, dark)),
     )
 }
 

@@ -2,14 +2,10 @@ package com.aloys23.komiraquake.ui.settings
 
 import android.content.Context
 import android.content.Intent
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -21,6 +17,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -31,16 +28,16 @@ import com.aloys23.komiraquake.model.WarningLevel
 import com.aloys23.komiraquake.service.RootHardening
 import com.aloys23.komiraquake.service.SystemPermissions
 import com.aloys23.komiraquake.service.WarningService
-import com.aloys23.komiraquake.ui.components.Label
-import com.aloys23.komiraquake.ui.components.AppCard
 import com.aloys23.komiraquake.ui.components.AppIcon
-import com.aloys23.komiraquake.ui.components.AppSwitchRow
+import com.aloys23.komiraquake.ui.components.Label
 import com.aloys23.komiraquake.ui.components.LucideIcon
-import com.aloys23.komiraquake.ui.components.SectionHeader
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.ui.semantics.Role
-import com.aloys23.komiraquake.ui.theme.AppSurfaces
-import com.aloys23.komiraquake.ui.theme.SeismicColors
+import com.aloys23.komiraquake.ui.theme.LocalAppDark
+import com.aloys23.komiraquake.ui.theme.warningColor
+import top.yukonga.miuix.kmp.basic.BasicComponent
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.SmallTitle
+import top.yukonga.miuix.kmp.preference.SwitchPreference
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -80,19 +77,17 @@ internal fun PermissionSection(
     var rootBusy by remember { mutableStateOf(false) }
 
     Column(modifier = modifier) {
-        SectionHeader("权限与后台运行", dark)
-        AppCard(dark) {
+        SmallTitle("权限与后台运行")
+        Card {
             PermissionRow(
                 title = "通知权限",
                 summary = "预警通知与全屏弹出的前提",
-                dark = dark,
                 granted = notifications,
                 onOpen = { context.startActivitySafe(SystemPermissions.appNotificationSettings(context)) },
             )
             PermissionRow(
                 title = "全屏通知直弹",
                 summary = "Android 14+ 需单独授权；锁屏亮屏直弹依赖它",
-                dark = dark,
                 granted = fullScreen,
                 onOpen = SystemPermissions.fullScreenIntentSettings(context)?.let { intent ->
                     { context.startActivitySafe(intent) }
@@ -101,14 +96,12 @@ internal fun PermissionSection(
             PermissionRow(
                 title = "通知策略访问（勿扰绕过）",
                 summary = "授权后预警可临时越过勿扰",
-                dark = dark,
                 granted = policy,
                 onOpen = { context.startActivitySafe(SystemPermissions.policyAccessSettings()) },
             )
             PermissionRow(
                 title = "「地震预警」渠道允许打扰",
                 summary = "渠道级兜底：允许该渠道在勿扰下出声",
-                dark = dark,
                 onOpen = {
                     context.startActivitySafe(
                         SystemPermissions.warningChannelSettings(context, WarningService.CHANNEL_ID),
@@ -118,7 +111,6 @@ internal fun PermissionSection(
             PermissionRow(
                 title = "忽略电池优化",
                 summary = "避免 Doze 冻结后台网络",
-                dark = dark,
                 granted = battery,
                 onOpen = {
                     context.startActivitySafe(SystemPermissions.requestIgnoreBatteryOptimizations(context))
@@ -127,14 +119,12 @@ internal fun PermissionSection(
             PermissionRow(
                 title = "厂商自启动 / 后台弹出",
                 summary = "MIUI / HyperOS 等需手动允许自启与后台弹出界面",
-                dark = dark,
                 onOpen = { context.startActivitySafe(SystemPermissions.autoStartSettings(context)) },
             )
             if (root) {
                 PermissionRow(
                     title = "Root 一键加固",
                     summary = "su 加入电池白名单 / 逃逸 App Standby / 预授权限",
-                    dark = dark,
                     enabled = !rootBusy,
                     onOpen = {
                         scope.launch {
@@ -151,26 +141,34 @@ internal fun PermissionSection(
 
         if (rootLog != null) {
             Spacer(Modifier.height(6.dp))
-            Label(rootLog.orEmpty(), AppSurfaces.outline(dark), size = 11.sp)
+            Label(rootLog.orEmpty(), MiuixTheme.colorScheme.onSurfaceSecondary, size = 11.sp)
         }
 
         Spacer(Modifier.height(14.dp))
-        SectionHeader("后台运行", dark)
-        AppCard(dark) {
-            AppSwitchRow("后台保活服务", settings.enableBackgroundGuard, dark,
-                onChange = { checked -> onUpdate { it.copy(enableBackgroundGuard = checked) } })
+        SmallTitle("后台运行")
+        Card {
+            SwitchPreference(
+                title = "后台保活服务",
+                checked = settings.enableBackgroundGuard,
+                onCheckedChange = { checked -> onUpdate { it.copy(enableBackgroundGuard = checked) } },
+            )
             Label(
                 "常驻前台服务以维持 WS 实时预警链路；可随时关闭",
-                AppSurfaces.outline(dark),
+                MiuixTheme.colorScheme.onSurfaceSecondary,
                 size = 11.sp,
+                modifier = Modifier.padding(horizontal = 16.dp),
             )
             Spacer(Modifier.height(6.dp))
-            AppSwitchRow("预警时绕过勿扰", settings.enableDndBypass, dark,
-                onChange = { checked -> onUpdate { it.copy(enableDndBypass = checked) } })
+            SwitchPreference(
+                title = "预警时绕过勿扰",
+                checked = settings.enableDndBypass,
+                onCheckedChange = { checked -> onUpdate { it.copy(enableDndBypass = checked) } },
+            )
             Label(
                 "需先授予「通知策略访问」；预警结束自动恢复原勿扰状态",
-                AppSurfaces.outline(dark),
+                MiuixTheme.colorScheme.onSurfaceSecondary,
                 size = 11.sp,
+                modifier = Modifier.padding(horizontal = 16.dp),
             )
         }
     }
@@ -180,39 +178,34 @@ internal fun PermissionSection(
 private fun PermissionRow(
     title: String,
     summary: String,
-    dark: Boolean,
     granted: Boolean? = null,
     enabled: Boolean = true,
     onOpen: (() -> Unit)? = null,
 ) {
     val clickable = enabled && onOpen != null
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(enabled = clickable, role = Role.Button, onClickLabel = "打开$title 设置") { onOpen?.invoke() }
-            .heightIn(min = 64.dp).padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Label(title, AppSurfaces.onSurface(dark), size = 13.sp)
-            Spacer(Modifier.height(2.dp))
-            Label(summary, AppSurfaces.outline(dark), size = 11.sp)
-        }
-        Spacer(Modifier.width(8.dp))
-        val statusColor = SeismicColors.severity(
-            if (granted == false) WarningLevel.WARNING else WarningLevel.NORMAL,
-            dark,
-        )
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            LucideIcon(when (granted) {
-                true -> AppIcon.CircleCheck
-                false -> AppIcon.CircleAlert
-                null -> AppIcon.ExternalLink
-            }, if (enabled) statusColor else AppSurfaces.disabled(dark))
-            Label(when (granted) { true -> "已开启"; false -> "未开启"; null -> "去设置" },
-                if (enabled) statusColor else AppSurfaces.disabled(dark), size = 12.sp)
-        }
-    }
+    val statusColor = warningColor(
+        if (granted == false) WarningLevel.WARNING else WarningLevel.NORMAL,
+        LocalAppDark.current,
+    )
+    BasicComponent(
+        title = title,
+        summary = summary,
+        onClickLabel = "打开$title 设置",
+        role = Role.Button,
+        enabled = enabled,
+        onClick = if (clickable) onOpen else null,
+        endActions = {
+            val tint = if (enabled) statusColor else MiuixTheme.colorScheme.disabledOnSurface
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                LucideIcon(when (granted) {
+                    true -> AppIcon.CircleCheck
+                    false -> AppIcon.CircleAlert
+                    null -> AppIcon.ExternalLink
+                }, tint)
+                Label(when (granted) { true -> "已开启"; false -> "未开启"; null -> "去设置" }, tint, size = 12.sp)
+            }
+        },
+    )
 }
 
 private fun Context.startActivitySafe(intent: Intent) {

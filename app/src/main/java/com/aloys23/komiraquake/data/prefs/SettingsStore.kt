@@ -18,7 +18,7 @@ enum class ThemeMode {
 
 /** 设置快照。《NATIVE_PORT_SPEC》 §7。 */
 data class Settings(
-    val basemapId: String = "amap_vector",
+    val basemapId: String = "petal",
     val intensityStandard: IntensityStandard = IntensityStandard.CSIS,
     /** 本地烈度过滤：仅当本地预估烈度达到该值时才提醒；0 表示不作筛选。 */
     val localIntensityFilter: Double = 0.0,
@@ -102,7 +102,7 @@ class SettingsStore internal constructor(private val prefs: SharedPreferences) {
     }
 
     private fun load(): Settings = Settings(
-        basemapId = prefs.getString("basemapId", "amap_vector") ?: "amap_vector",
+        basemapId = prefs.getString("basemapId", "petal") ?: "petal",
         intensityStandard = if (prefs.getInt("intensityStandard", 0) == 1) {
             IntensityStandard.JMA
         } else {

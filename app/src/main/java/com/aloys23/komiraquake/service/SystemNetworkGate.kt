@@ -42,12 +42,17 @@ class SystemNetworkGate(context: Context) : NetworkGate {
             override fun onAvailable(network: Network) { _online.value = true }
             override fun onLost(network: Network) { recompute(manager) }
             override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-                _online.value = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                // 以整体默认网络为准：某张次要网（VPN / 旧网）丢掉 INTERNET 不等于全局断网，
+                // 直接按该网置离线会让 awaitOnline() 再也等不到恢复。
+                recompute(manager)
             }
         }
         return runCatching { manager.registerNetworkCallback(request, registered) }
             .onSuccess { callback = registered }
-            .onFailure { recompute(manager) }
+            // 注册失败就再没有回调来判断可达性：置为恒在线，等价于 AlwaysOnline，让各源退回
+            // 固定退避。此处不能按当前快照 recompute——一旦失败时恰好离线，回调缺失会让
+            // awaitOnline() 永久挂起，断网后再也不会重连。
+            .onFailure { _online.value = true }
             .isSuccess
             .also { if (it) recompute(manager) }
     }

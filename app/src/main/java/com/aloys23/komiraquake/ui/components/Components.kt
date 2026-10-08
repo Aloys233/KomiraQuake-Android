@@ -1,7 +1,6 @@
 package com.aloys23.komiraquake.ui.components
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -29,7 +28,6 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aloys23.komiraquake.core.AppClock
@@ -39,24 +37,24 @@ import com.aloys23.komiraquake.core.ClockState
 import com.aloys23.komiraquake.core.IntensityCalculator
 import com.aloys23.komiraquake.core.IntensityStandard
 import com.aloys23.komiraquake.core.WarningSpeech
+import com.aloys23.komiraquake.model.ConnectionStatus
+import com.aloys23.komiraquake.model.DataSourceInfo
 import com.aloys23.komiraquake.model.EarthquakeEvent
 import com.aloys23.komiraquake.model.WarningLevel
 import com.aloys23.komiraquake.ui.theme.AppFontFamily
-import com.aloys23.komiraquake.ui.theme.AppSurfaces
-import com.aloys23.komiraquake.ui.theme.AppTypography
 import com.aloys23.komiraquake.ui.theme.LocalAppDark
 import com.aloys23.komiraquake.ui.theme.SeismicColors
+import com.aloys23.komiraquake.ui.theme.warningColor
 import kotlinx.coroutines.delay
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.IconButton
+import top.yukonga.miuix.kmp.basic.Text
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /** 发震时刻：与校时时钟一致，固定渲染为 UTC+8 的完整时刻。 */
 internal fun quakeTimeText(timestamp: Long): String = ClockFormat.utc8Stamp(timestamp)
-
-@Composable
-fun Label(text: String, color: Color, size: TextUnit = 14.sp, bold: Boolean = false,
-    maxLines: Int = Int.MAX_VALUE, modifier: Modifier = Modifier) {
-    BasicText(text, modifier, style = AppTypography.style(size.value.coerceAtLeast(12f), bold).copy(color = color),
-        maxLines = maxLines, overflow = TextOverflow.Ellipsis)
-}
 
 /** Fixed UTC+8, actual clock status. Never treat no event as a safety indication. */
 @Composable
@@ -67,7 +65,34 @@ fun NtpClockLabel(info: ClockInfo, dark: Boolean, modifier: Modifier = Modifier)
     val color = if (synced) SeismicColors.clockSynced(dark) else SeismicColors.clockUnsynced(dark)
     Column(modifier.mapGlass(dark, RoundedCornerShape(14.dp)).padding(horizontal = 12.dp, vertical = 8.dp)) {
         Label(ClockFormat.utc8Stamp(nowMs), color, 12.sp, bold = true)
-        Label("${ClockFormat.ZONE_LABEL} · ${if (synced) "已校准" else "未同步"}", AppSurfaces.outline(dark), 12.sp)
+        Label("${ClockFormat.ZONE_LABEL} · ${if (synced) "已校准" else "未同步"}",
+            MiuixTheme.colorScheme.onSurfaceSecondary, 12.sp)
+    }
+}
+
+/**
+ * 左下角数据源状态徽章（对齐桌面端 sourceBadge）：radio 图标与名称按连接状态着色，
+ * 末尾追加状态文本。在线绿 / 连接中黄 / 断开或异常红。
+ */
+@Composable
+fun SourceStatusLabel(info: DataSourceInfo, dark: Boolean, modifier: Modifier = Modifier) {
+    val color = when (info.status) {
+        ConnectionStatus.CONNECTED -> SeismicColors.clockSynced(dark)
+        ConnectionStatus.CONNECTING -> SeismicColors.severity(WarningLevel.WATCH, dark)
+        else -> SeismicColors.clockUnsynced(dark)
+    }
+    val status = when (info.status) {
+        ConnectionStatus.CONNECTED -> "源在线"
+        ConnectionStatus.CONNECTING -> "连接中"
+        ConnectionStatus.ERROR -> "连接异常"
+        ConnectionStatus.DISCONNECTED -> "未连接"
+    }
+    Row(modifier.fillMaxWidth().mapGlass(dark, RoundedCornerShape(14.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        LucideIcon(AppIcon.Radio, color, modifier = Modifier.size(16.dp))
+        Label("数据源", MiuixTheme.colorScheme.onSurfaceSecondary, 12.sp)
+        Label(info.name, color, 12.sp, bold = true, maxLines = 1, modifier = Modifier.weight(1f))
+        Label(status, MiuixTheme.colorScheme.onSurfaceSecondary, 11.sp, maxLines = 1)
     }
 }
 
@@ -158,7 +183,9 @@ private fun BadgeText(text: String, color: Color, sizePx: Float, bold: Boolean) 
 @Composable
 fun QuakeHudCard(event: EarthquakeEvent, dark: Boolean, modifier: Modifier = Modifier,
     standard: IntensityStandard = IntensityStandard.CSIS, isActive: Boolean = false) {
-    val severity = SeismicColors.severity(event.warningLevel, dark)
+    val severity = warningColor(event.warningLevel, dark)
+    val onSurface = MiuixTheme.colorScheme.onSurface
+    val secondary = MiuixTheme.colorScheme.onSurfaceSecondary
     val intensity = intensityDisplayOf(event, standard)
     Row(modifier.fillMaxWidth().mapGlass(dark).padding(14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -175,71 +202,50 @@ fun QuakeHudCard(event: EarthquakeEvent, dark: Boolean, modifier: Modifier = Mod
                     else -> event.source
                 }, severity, 12.sp, bold = true, maxLines = 1, modifier = Modifier.weight(1f))
             }
-            Label(event.location, AppSurfaces.onSurface(dark), 19.sp, bold = true, maxLines = 2)
+            Label(event.location, onSurface, 19.sp, bold = true, maxLines = 2)
             // 发震时刻独占一行，始终完整显示。
-            Label(quakeTimeText(event.timestamp) + "  UTC+8", AppSurfaces.outline(dark), 12.sp, maxLines = 1)
+            Label(quakeTimeText(event.timestamp) + "  UTC+8", secondary, 12.sp, maxLines = 1)
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Label("M %.1f".format(event.magnitude) + " · 深度 %.0f km".format(event.depth),
-                    AppSurfaces.outline(dark), 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                    secondary, 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
                 // 数据源标注（提供方·机构）：次要信息，放在震级/深度行右侧。
-                Label(event.sourceTag, AppSurfaces.outline(dark), 11.sp, maxLines = 1)
+                Label(event.sourceTag, secondary, 11.sp, maxLines = 1)
             }
         }
     }
 }
 
-@Composable
-fun MapStatusBar(statusText: String, statusLevel: WarningLevel, locationName: String, dark: Boolean,
-    onOpenList: (() -> Unit)?, onOpenSettings: () -> Unit, modifier: Modifier = Modifier) {
-    val color = SeismicColors.severity(statusLevel, dark)
-    Row(modifier.fillMaxWidth().mapGlass(dark).padding(12.dp), verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        Column(Modifier.weight(1f)) {
-            Label("KomiraQuake", AppSurfaces.onSurface(dark), 15.sp, bold = true)
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                LucideIcon(if (statusLevel == WarningLevel.NORMAL) AppIcon.Radio else AppIcon.CircleAlert, color, modifier = Modifier.size(16.dp))
-                Label(statusText, color, 12.sp, modifier = Modifier.weight(1f))
-            }
-            Label(locationName, AppSurfaces.outline(dark), 12.sp, maxLines = 2)
-        }
-        onOpenList?.let { AppIconButton(AppIcon.List, "打开地震列表", dark, it) }
-        AppIconButton(AppIcon.Settings, "打开设置", dark, onOpenSettings)
-    }
-}
-
-/** kanameishi 式列表项：左侧烈度色块，右侧「震中 / 发震时刻 / 震级·深度·距离」。 */
+/** kanameishi 式列表项：左侧烈度色块，右侧「震中 / 发震时刻 / 震级·深度·距离」。点击整卡进入详情页。 */
 @Composable
 fun EarthquakeTile(event: EarthquakeEvent, dark: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier,
-    mapFocused: Boolean = false, onToggleFocus: () -> Unit = {}, standard: IntensityStandard = IntensityStandard.CSIS) {
+    standard: IntensityStandard = IntensityStandard.CSIS) {
     // 列表固定展示「震源最大烈度」；本地预估烈度只出现在 HUD / 全屏预警。
     val intensity = listIntensityDisplayOf(event, standard)
-    AppCard(dark, modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = "在地图定位${event.location}", onClick = onClick)) {
+    val onSurface = MiuixTheme.colorScheme.onSurface
+    val secondary = MiuixTheme.colorScheme.onSurfaceSecondary
+    Card(modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = "查看${event.location}详情", onClick = onClick),
+        insideMargin = PaddingValues(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             IntensityBadge(intensity.text, intensity.color, size = 60.dp, label = intensity.shortLabel)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    if (event.isActive) Box(Modifier.size(6.dp).clip(RoundedCornerShape(3.dp)).background(AppSurfaces.accent(dark)))
-                    Label(event.location, AppSurfaces.onSurface(dark), 16.sp, bold = true, maxLines = 2,
+                    if (event.isActive) Box(Modifier.size(6.dp).clip(RoundedCornerShape(3.dp)).background(MiuixTheme.colorScheme.primary))
+                    Label(event.location, onSurface, 16.sp, bold = true, maxLines = 2,
                         modifier = Modifier.weight(1f))
                 }
                 // 发震时刻独占一行，始终完整显示。
-                Label(quakeTimeText(event.timestamp) + "  UTC+8", AppSurfaces.outline(dark), 12.sp, maxLines = 1)
+                Label(quakeTimeText(event.timestamp) + "  UTC+8", secondary, 12.sp, maxLines = 1)
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Label("M %.1f".format(event.magnitude), AppSurfaces.onSurface(dark), 15.sp, bold = true)
+                    Label("M %.1f".format(event.magnitude), onSurface, 15.sp, bold = true)
                     Label("深度 %.0f km".format(event.depth),
-                        AppSurfaces.outline(dark), 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                        secondary, 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
                     // 数据源标注（提供方·机构）：次要信息，放在震级/深度行右侧。
-                    Label(event.sourceTag, AppSurfaces.outline(dark), 11.sp, maxLines = 1)
+                    Label(event.sourceTag, secondary, 11.sp, maxLines = 1)
                 }
             }
-        }
-        Spacer(Modifier.height(12.dp))
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            AppButton(if (mapFocused) "取消显示" else "地图显示", dark, onToggleFocus,
-                icon = if (mapFocused) AppIcon.EyeOff else AppIcon.MapPin, primary = mapFocused)
         }
     }
 }
@@ -277,50 +283,17 @@ private fun countdownPhrase(countdown: Int): String = when {
     else -> "本地到时未知，请立即避险"
 }
 
-/**
- * 「预警尚未开启」引导卡。
- *
- * 预警总开关默认关闭——不擅自替用户打开安全功能。但新装用户若第一眼看不到这件事，
- * 就会以为「装好了却在震时不响」。故在地图页顶部显著位置提示一次，可关闭且不重复打扰。
- */
-@Composable
-fun WarningOnboardingCard(
-    dark: Boolean,
-    onEnable: () -> Unit,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val accent = SeismicColors.severity(WarningLevel.WARNING, dark)
-    Column(modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
-        .background(AppSurfaces.surfaceContainer(dark))
-        .border(1.dp, accent.copy(alpha = 0.55f), RoundedCornerShape(20.dp))
-        .padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            LucideIcon(AppIcon.BellOff, accent)
-            Label("地震预警尚未开启", AppSurfaces.onSurface(dark), 16.sp, bold = true,
-                modifier = Modifier.weight(1f)
-                    .semantics { heading() })
-            AppIconButton(AppIcon.Close, "关闭提示", dark, onDismiss)
-        }
-        Label(
-            "当前只展示地震事件，不会发出声音、震动或全屏预警。开启后才会按本地烈度提醒。",
-            AppSurfaces.outline(dark), 13.sp,
-        )
-        AppButton("开启地震预警", dark, onEnable, Modifier.fillMaxWidth(), AppIcon.Bell, primary = true)
-    }
-}
-
 /** Solid, theme-consistent warning. No glass or decorative animation in the emergency path. */
 @Suppress("UNUSED_PARAMETER")
 @Composable
 fun WarningOverlay(event: EarthquakeEvent?, countdown: Int, onDismiss: () -> Unit, modifier: Modifier = Modifier,
     dark: Boolean = LocalAppDark.current, reduceMotion: Boolean = false, onMute: (() -> Unit)? = null,
     onStop: (() -> Unit)? = null, standard: IntensityStandard = IntensityStandard.CSIS) {
-    val severity = SeismicColors.severity(event?.warningLevel ?: WarningLevel.WARNING, dark)
-    val foreground = AppSurfaces.onSurface(dark)
-    val secondary = AppSurfaces.outline(dark)
+    val severity = warningColor(event?.warningLevel ?: WarningLevel.WARNING, dark)
+    val foreground = MiuixTheme.colorScheme.onSurface
+    val secondary = MiuixTheme.colorScheme.onSurfaceSecondary
     AnnounceWarningAccessibility(event, countdown, standard)
-    Box(modifier.fillMaxSize().background(AppSurfaces.surface(dark)).safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
+    Box(modifier.fillMaxSize().background(MiuixTheme.colorScheme.background).safeDrawingPadding(), contentAlignment = Alignment.TopCenter) {
         Column(Modifier.widthIn(max = 640.dp).fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -330,7 +303,7 @@ fun WarningOverlay(event: EarthquakeEvent?, countdown: Int, onDismiss: () -> Uni
                         modifier = Modifier.semantics { heading() })
                     Label("实时预警 · 请立即采取避险措施", secondary, 12.sp)
                 }
-                AppIconButton(AppIcon.ChevronDown, "收起全屏，保留提醒", dark, onDismiss)
+                IconButton(onClick = onDismiss) { LucideIcon(AppIcon.ChevronDown, secondary, "收起全屏，保留提醒") }
             }
             Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(severity).padding(20.dp)
                 // 焦点落到该卡片时读出完整倒计时句，而不是逐个数字碎片。
@@ -357,7 +330,7 @@ fun WarningOverlay(event: EarthquakeEvent?, countdown: Int, onDismiss: () -> Uni
                     }
                 }
             }
-            AppCard(dark, Modifier.fillMaxWidth()) {
+            Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(16.dp)) {
                 Label(event?.location.orEmpty(), foreground, 22.sp, bold = true)
                 if (event != null) {
                     Spacer(Modifier.height(8.dp))
@@ -369,16 +342,32 @@ fun WarningOverlay(event: EarthquakeEvent?, countdown: Int, onDismiss: () -> Uni
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                LucideIcon(AppIcon.Shield, AppSurfaces.accent(dark))
+                LucideIcon(AppIcon.Shield, MiuixTheme.colorScheme.primary)
                 Column(Modifier.weight(1f)) {
                     Label("伏地 · 遮挡 · 抓牢", foreground, 22.sp, bold = true)
                     Label("Drop · Cover · Hold on", secondary, 13.sp)
                     Label("预计到达不代表危险结束，请持续避险", secondary, 14.sp, modifier = Modifier.padding(top = 8.dp))
                 }
             }
-            onMute?.let { AppButton("静音本次", dark, it, Modifier.fillMaxWidth(), AppIcon.Mute) }
-            AppButton("收起全屏 · 保留提醒", dark, onDismiss, Modifier.fillMaxWidth(), AppIcon.ChevronDown, primary = true)
-            onStop?.let { AppButton("停止本次提醒", dark, it, Modifier.fillMaxWidth(), AppIcon.BellOff) }
+            onMute?.let {
+                Button(onClick = it, modifier = Modifier.fillMaxWidth()) {
+                    LucideIcon(AppIcon.Mute, MiuixTheme.colorScheme.primary)
+                    Spacer(Modifier.width(8.dp))
+                    Text("静音本次", style = MiuixTheme.textStyles.button)
+                }
+            }
+            Button(onClick = onDismiss, colors = ButtonDefaults.buttonColorsPrimary(), modifier = Modifier.fillMaxWidth()) {
+                LucideIcon(AppIcon.ChevronDown, MiuixTheme.colorScheme.onPrimary)
+                Spacer(Modifier.width(8.dp))
+                Text("收起全屏 · 保留提醒", style = MiuixTheme.textStyles.button)
+            }
+            onStop?.let {
+                Button(onClick = it, modifier = Modifier.fillMaxWidth()) {
+                    LucideIcon(AppIcon.BellOff, MiuixTheme.colorScheme.primary)
+                    Spacer(Modifier.width(8.dp))
+                    Text("停止本次提醒", style = MiuixTheme.textStyles.button)
+                }
+            }
             Spacer(Modifier.height(8.dp))
         }
     }

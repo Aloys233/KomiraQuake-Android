@@ -4,12 +4,13 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -21,18 +22,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.aloys23.komiraquake.data.prefs.Settings
 import com.aloys23.komiraquake.service.LocationSource
 import com.aloys23.komiraquake.service.LocationState
-import com.aloys23.komiraquake.ui.components.AppButton
-import com.aloys23.komiraquake.ui.components.AppCard
 import com.aloys23.komiraquake.ui.components.AppIcon
 import com.aloys23.komiraquake.ui.components.Label
 import com.aloys23.komiraquake.ui.components.LucideIcon
-import com.aloys23.komiraquake.ui.components.SectionHeader
-import com.aloys23.komiraquake.ui.theme.AppSurfaces
-import com.aloys23.komiraquake.ui.theme.SeismicColors
+import top.yukonga.miuix.kmp.basic.Button
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.Card
+import top.yukonga.miuix.kmp.basic.SmallTitle
+import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
+import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /**
  * 「定位」分区。
@@ -51,8 +52,8 @@ internal fun LocationSection(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier) {
-        SectionHeader("当前位置", dark)
-        AppCard(dark) {
+        SmallTitle("当前位置")
+        Card(insideMargin = PaddingValues(16.dp)) {
             val (sourceTitle, sourceNote, precise) = when (location.source) {
                 LocationSource.NATIVE ->
                     Triple("设备定位 (GPS)", "精度取决于系统定位结果", true)
@@ -64,31 +65,35 @@ internal fun LocationSection(
             }
             Label(
                 location.name,
-                if (precise) AppSurfaces.onSurface(dark) else AppSurfaces.outline(dark),
+                if (precise) MiuixTheme.colorScheme.onSurface else MiuixTheme.colorScheme.onSurfaceSecondary,
                 size = 16.sp, bold = true,
             )
             Spacer(Modifier.height(2.dp))
-            Label(sourceTitle, AppSurfaces.onSurface(dark), 13.sp, bold = true)
+            Label(sourceTitle, MiuixTheme.colorScheme.onSurface, 13.sp, bold = true)
             Spacer(Modifier.height(2.dp))
-            Label(sourceNote, AppSurfaces.outline(dark), 12.sp)
+            Label(sourceNote, MiuixTheme.colorScheme.onSurfaceSecondary, 12.sp)
             val lat = location.latitude
             val lon = location.longitude
             if (lat != null && lon != null) {
                 Spacer(Modifier.height(6.dp))
-                Label("%.4f°N  %.4f°E".format(lat, lon), AppSurfaces.outline(dark), 12.sp)
+                Label("%.4f°N  %.4f°E".format(lat, lon), MiuixTheme.colorScheme.onSurfaceSecondary, 12.sp)
             }
             Spacer(Modifier.height(12.dp))
-            AppButton("重新定位", dark, onRequestLocation, icon = AppIcon.Locate, primary = true)
+            Button(onClick = onRequestLocation, colors = ButtonDefaults.buttonColorsPrimary()) {
+                LucideIcon(AppIcon.Locate, MiuixTheme.colorScheme.onPrimary)
+                Spacer(Modifier.width(8.dp))
+                Text("重新定位", style = MiuixTheme.textStyles.button)
+            }
             Spacer(Modifier.height(6.dp))
             Label(
                 "优先使用系统 GPS 定位；无权限或超时后才回退到 IP 定位。",
-                AppSurfaces.outline(dark), 11.sp,
+                MiuixTheme.colorScheme.onSurfaceSecondary, 11.sp,
             )
         }
 
         Spacer(Modifier.height(14.dp))
-        SectionHeader("手动坐标", dark)
-        AppCard(dark) {
+        SmallTitle("手动坐标")
+        Card(insideMargin = PaddingValues(16.dp)) {
             var expanded by rememberSaveable { mutableStateOf(false) }
             Row(
                 Modifier.fillMaxWidth().heightIn(min = 48.dp)
@@ -98,12 +103,12 @@ internal fun LocationSection(
             ) {
                 Label(
                     "手动输入经纬度",
-                    AppSurfaces.onSurface(dark), 14.sp,
+                    MiuixTheme.colorScheme.onSurface, 14.sp,
                     modifier = Modifier.weight(1f),
                 )
                 LucideIcon(
                     if (expanded) AppIcon.ChevronDown else AppIcon.ChevronRight,
-                    AppSurfaces.outline(dark),
+                    MiuixTheme.colorScheme.onSurfaceSecondary,
                 )
             }
             AnimatedVisibility(expanded) {
@@ -133,15 +138,19 @@ internal fun LocationSection(
                     val valid = latitude != null && longitude != null &&
                         latitude in -90.0..90.0 && longitude in -180.0..180.0
                     Spacer(Modifier.height(8.dp))
-                    AppButton(
-                        "应用精确经纬度", dark,
+                    Button(
                         onClick = { onSetManualLocation(latitude!!, longitude!!) },
-                        icon = AppIcon.Check, primary = true, enabled = valid,
-                    )
+                        colors = ButtonDefaults.buttonColorsPrimary(),
+                        enabled = valid,
+                    ) {
+                        LucideIcon(AppIcon.Check, MiuixTheme.colorScheme.onPrimary)
+                        Spacer(Modifier.width(8.dp))
+                        Text("应用精确经纬度", style = MiuixTheme.textStyles.button)
+                    }
                     Spacer(Modifier.height(6.dp))
                     Label(
                         "WGS84 · 纬度 −90～90，经度 −180～180",
-                        AppSurfaces.outline(dark), 11.sp,
+                        MiuixTheme.colorScheme.onSurfaceSecondary, 11.sp,
                     )
                 }
             }
