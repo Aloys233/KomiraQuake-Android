@@ -25,7 +25,12 @@ class AlertSoundService(private val context: Context) {
     private val cueQueue = ArrayDeque<String>()
 
     /** 提示通道播放器：倒计时与抵达提示走这里，与语句通道并发。 */
+    @Volatile
     private var cue: MediaPlayer? = null
+
+    /** 当前提示是否为不可打断片段（20/30/…/60s 整句、抵达提示序列）。 */
+    @Volatile
+    private var cueProtected = false
     private val lastPlayed = HashMap<String, Long>()
     private val available = HashSet<String>()
 
@@ -128,28 +133,60 @@ class AlertSoundService(private val context: Context) {
     fun playCountdownClip(secondsLeft: Int) {
         if (!enabled || volume <= 0f) return
         if (secondsLeft < 0 || secondsLeft > 60) return
-        // 20/30/40/50/60s 是 1.7~1.8s 的整句播报，比倒计时周期长。
-        // 正在播这类句子时必须让它说完，否则「还有 N秒抵达」每次都被切断。
-        if (cue != null) return
+        if (cue != null) {
+            // 20/30/40/50/60s 是 1.7~1.8s 的整句播报，比倒计时周期长，正在播时必须让它说完。
+            if (cueProtected) return
+            // 短提示之间不得静默丢拍：编排循环按 250ms 采样，相邻两拍的间隔会抖到
+            // <0.888s（countdown.wav 时长），旧的一下没播完这一拍就到。直接顶掉重放，
+            // 保证 11~19s 这类回退区间仍是一秒一响（与桌面端固定 1s 定时器听感一致）。
+            stopCue()
+        }
         val file = "${secondsLeft}s.mp3"
         val path = if (file in available) assetPathFor("${secondsLeft}s") else assetPathFor("countdown")
         if (path == null || file !in available && path.substringAfterLast('/') !in available) return
         requestFocus()
         // 提示通道独立于语句通道：长音频（intense 3.1s）不会再堵死每秒一次的秒数。
-        runCatching {
-            cue = createPlayer(path).apply {
-                setOnCompletionListener { releaseCue() }
-                start()
-            }
-        }.onFailure {
-            releaseCue()
-        }
+        // 整句播报不可打断，短提示可被下一秒顶掉。
+        startCue(path, protected = isCountdownSentence(secondsLeft))
     }
 
-    private fun releaseCue() {
-        val finished = cue
+    /** 20/30/40/50/60s 为整句播报，时长超过倒计时周期，必须整段播完。 */
+    private fun isCountdownSentence(secondsLeft: Int): Boolean =
+        secondsLeft >= 20 && secondsLeft % 10 == 0
+
+    /** 在提示通道启动一段音频。 */
+    private fun startCue(path: String, protected: Boolean) {
+        val player = runCatching { createPlayer(path) }.getOrNull()
+        if (player == null) {
+            cue = null
+            cueProtected = false
+            if (queue.isEmpty() && cueQueue.isEmpty()) abandonFocus()
+            return
+        }
+        cue = player
+        cueProtected = protected
+        player.setOnCompletionListener { finishCue(player) }
+        runCatching { player.start() }.onFailure { finishCue(player) }
+    }
+
+    /** 打断当前提示片段（仅用于顶掉未播完的短提示）。 */
+    private fun stopCue() {
+        val current = cue ?: return
         cue = null
-        runCatching { finished?.release() }
+        cueProtected = false
+        runCatching { current.release() }
+    }
+
+    /** 一段提示播完（或被顶掉）后的收尾：复位通道并按需续播抵达序列。 */
+    private fun finishCue(player: MediaPlayer) {
+        if (cue !== player) {
+            // 已被新片段顶替，迟到的回调只负责释放自己。
+            runCatching { player.release() }
+            return
+        }
+        cue = null
+        cueProtected = false
+        runCatching { player.release() }
         if (cueQueue.isEmpty()) {
             if (queue.isEmpty()) abandonFocus()
             return
@@ -172,14 +209,8 @@ class AlertSoundService(private val context: Context) {
     private fun pumpCueQueue() {
         if (cue != null) return
         val path = cueQueue.removeFirstOrNull() ?: return
-        runCatching {
-            cue = createPlayer(path).apply {
-                setOnCompletionListener { releaseCue() }
-                start()
-            }
-        }.onFailure {
-            releaseCue()
-        }
+        // 抵达序列整段不可被后续秒数打断。
+        startCue(path, protected = true)
     }
 
     fun playIntense() = play("intense")
@@ -193,6 +224,7 @@ class AlertSoundService(private val context: Context) {
         current = null
         runCatching { cue?.release() }
         cue = null
+        cueProtected = false
         lastPlayed.clear()
         abandonFocus()
     }

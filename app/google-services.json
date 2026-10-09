@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1014050994639",
+    "project_id": "aloys23-37f84",
+    "storage_bucket": "aloys23-37f84.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1014050994639:android:05a83bd10f1fe758c57aba",
+        "android_client_info": {
+          "package_name": "com.aloys23.komiraquake"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBbW_NKhPmMo4s2xahbVrE-wmlTzSk4U9o"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

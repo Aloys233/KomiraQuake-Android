@@ -1,9 +1,13 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import com.google.firebase.perf.plugin.FirebasePerfExtension
 
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.google.services)
+    alias(libs.plugins.firebase.crashlytics)
+    alias(libs.plugins.firebase.perf)
 }
 
 android {
@@ -16,8 +20,8 @@ android {
         targetSdk = 37
         // 缺省值供本地开发；CI 推 tag 时用 -PversionName/-PversionCode 覆盖，
         // 使产物内的版本与 tag 一致（否则发 v1.0.4 仍会打出 versionName=1.0.3）。
-        versionCode = (providers.gradleProperty("versionCode").orNull ?: "4").toInt()
-        versionName = providers.gradleProperty("versionName").orNull ?: "1.0.3"
+        versionCode = (providers.gradleProperty("versionCode").orNull ?: "10100").toInt()
+        versionName = providers.gradleProperty("versionName").orNull ?: "1.1.0"
         testInstrumentationRunner = "com.aloys23.komiraquake.IsolatedTestRunner"
     }
 
@@ -34,6 +38,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // 关闭 debug 的字节码插桩：插桩会编译期改写 debug 类，导致 JVM 单测
+            // （如 WolfxSourceTest 的协程时序断言）失败；release 仍保留插桩以采集网络请求。
+            configure<FirebasePerfExtension> {
+                setInstrumentationEnabled(false)
+            }
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -90,6 +101,15 @@ dependencies {
 
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.okhttp)
+
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.analytics)
+    implementation(libs.firebase.crashlytics)
+    implementation(libs.firebase.perf)
+
+    // firebase-perf 经 appcompat 传递引入 fragment；lint 的
+    // InvalidFragmentVersionForActivityResult 只在直接声明时才认可版本，故固定为已解析的 1.5.4。
+    implementation(libs.androidx.fragment)
 
     androidTestImplementation("androidx.test:runner:1.6.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")

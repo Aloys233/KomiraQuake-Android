@@ -127,4 +127,4 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           draft: false
-          token: ${{ secrets.DISPATCH_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
