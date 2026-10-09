@@ -70,11 +70,13 @@ jobs:
           fi
           # Secrets 里存 base64，避免二进制文件无法放进 Secret 的问题。
           printf '%s' "$KOMIRA_KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
+          # 必须带 ORG_GRADLE_PROJECT_ 前缀：build.gradle.kts 用 providers.gradleProperty(...)
+          # 读取，Gradle 只把该前缀的环境变量当作项目属性；否则签名不生效、产出未签名 APK。
           {
-            echo "KOMIRA_KEYSTORE=$RUNNER_TEMP/release.jks"
-            echo "KOMIRA_KEYSTORE_PASSWORD=${KOMIRA_KEYSTORE_PASSWORD}"
-            echo "KOMIRA_KEY_ALIAS=${KOMIRA_KEY_ALIAS}"
-            echo "KOMIRA_KEY_PASSWORD=${KOMIRA_KEY_PASSWORD}"
+            echo "ORG_GRADLE_PROJECT_KOMIRA_KEYSTORE=$RUNNER_TEMP/release.jks"
+            echo "ORG_GRADLE_PROJECT_KOMIRA_KEYSTORE_PASSWORD=${KOMIRA_KEYSTORE_PASSWORD}"
+            echo "ORG_GRADLE_PROJECT_KOMIRA_KEY_ALIAS=${KOMIRA_KEY_ALIAS}"
+            echo "ORG_GRADLE_PROJECT_KOMIRA_KEY_PASSWORD=${KOMIRA_KEY_PASSWORD}"
           } >> "$GITHUB_ENV"
 
       # debug 与 release 都出：debug 供局域网连自建模拟源（放行明文 ws://，
@@ -96,7 +98,14 @@ jobs:
           mkdir -p dist
           for variant in debug release; do
             src="app/build/outputs/apk/$variant/app-$variant.apk"
-            test -f "$src" || { echo "缺少产物 $src" >&2; exit 1; }
+            if [ ! -f "$src" ]; then
+              unsigned="app/build/outputs/apk/$variant/app-$variant-unsigned.apk"
+              if [ -f "$unsigned" ]; then
+                echo "$variant APK 未签名（$unsigned）：检查 KOMIRA_KEYSTORE 等签名 Secrets 是否生效" >&2
+              fi
+              echo "缺少产物 $src" >&2
+              exit 1
+            fi
             cp "$src" "dist/komiraquake_${VERSION}_${variant}.apk"
           done
           ls -lh dist/
