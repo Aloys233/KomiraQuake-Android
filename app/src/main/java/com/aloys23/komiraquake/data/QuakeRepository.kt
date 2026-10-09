@@ -1,6 +1,7 @@
 package com.aloys23.komiraquake.data
 
 import com.aloys23.komiraquake.core.AppClock
+import com.aloys23.komiraquake.core.ForegroundGate
 import com.aloys23.komiraquake.core.NetworkGate
 import com.aloys23.komiraquake.core.QuakeCalculator
 import com.aloys23.komiraquake.data.db.HistoryStore
@@ -28,9 +29,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 
 /** Directory ingestion and live warning lifecycle are intentionally separate. */
@@ -44,6 +47,8 @@ class QuakeRepository(
     private val now: () -> Long = { AppClock.now() },
     /** 网络感知重连；默认恒在线，退化为各源固定退避。 */
     private val networkGate: NetworkGate = NetworkGate.AlwaysOnline,
+    /** 前后台闸门：目录 HTTP 轮询只在前台进行；实时 WS 长连接不受影响。 */
+    private val foregroundGate: ForegroundGate = ForegroundGate.AlwaysForeground,
 ) {
     private val directoryGate = EventGate()
     // Restore terminal identities before any source or collector can admit a replay.
@@ -74,9 +79,9 @@ class QuakeRepository(
     )
     private val sources: List<EarthquakeSource> = listOf(
         WolfxSource(scope, client, ::userPosition, { settings.current.intensityStandard },
-            networkGate = networkGate),
+            networkGate = networkGate, foregroundGate = foregroundGate),
         PancakesSource(scope, client, ::userPosition, { settings.current.intensityStandard },
-            networkGate = networkGate),
+            networkGate = networkGate, foregroundGate = foregroundGate),
         jian,
         whews,
         simulated,
@@ -132,10 +137,18 @@ class QuakeRepository(
                 recalculate()
             }
         } }
-        scope.launch { while (isActive) {
-            delay(1000)
-            synchronized(this@QuakeRepository) { lifecycle.expire(); publish() }
-        } }
+        scope.launch {
+            while (isActive) {
+                val active = synchronized(this@QuakeRepository) {
+                    val has = lifecycle.events.isNotEmpty()
+                    if (has) { lifecycle.expire(); publish() }
+                    has
+                }
+                // 有活动事件：1s 到期/发布；空闲：挂起，新事件经 publish() 更新 _activeWarnings 即时唤醒。
+                if (active) delay(ACTIVE_TICK_MS)
+                else withTimeoutOrNull(IDLE_TICK_MS) { _activeWarnings.first { it.isNotEmpty() } }
+            }
+        }
     }
 
     /** 依据启用集合启停各数据源；未启动或凭据未就绪时一律停，避免无凭据连接与后台空跑。 */
@@ -306,6 +319,11 @@ class QuakeRepository(
 
     companion object {
         const val MAX_HISTORY = 200
+
+        /** 有活动事件时的到期/发布周期。 */
+        private const val ACTIVE_TICK_MS = 1000L
+        /** 空闲时的最长等待；新事件会经 publish() 更新 _activeWarnings 立即唤醒。 */
+        private const val IDLE_TICK_MS = 5000L
 
         /** 聚合状态优先级：在线 > 连接中 > 异常 > 断开；用于单条状态栏展示。 */
         private fun aggregateSources(list: List<DataSourceInfo>): DataSourceInfo {

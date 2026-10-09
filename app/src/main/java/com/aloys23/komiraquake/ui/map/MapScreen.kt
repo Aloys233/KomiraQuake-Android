@@ -21,12 +21,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableDoubleStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -74,7 +77,13 @@ import com.aloys23.komiraquake.ui.theme.LocalReduceMotion
 import com.aloys23.komiraquake.ui.theme.SeismicColors
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.atan
@@ -93,14 +102,18 @@ private const val WAVE_WINDOW_MS = 60L * 60L * 1000L
 /** 波前隐去的烈度阈值（CSIS I：可感下限）；超过该烈度对应的半径后波前渐隐。 */
 private const val CSIS_FADE_LEVEL = 1.0
 
-/** 视口外多取两圈瓦片（与桌面端 prefetchMargin 一致），平移时新露出的区域已就绪，不会一格一格拼出来。 */
-private const val TILE_PREFETCH_MARGIN = 2
+/** 视口外预取一圈瓦片；手势期间优先保证当前视口，避免预取请求挡住可见内容。 */
+private const val TILE_PREFETCH_MARGIN = 1
 /** 跟随时新瓦片淡入时长（ms）：掩盖跨层级切换的清晰度突变。 */
 private const val TILE_FADE_MS = 180f
 /** 缩小兜底：最多向更细层钻取的层级数（下采样顶替）。兼顾快速捏合时跳过的层级。 */
 private const val TILE_FALLBACK_CHILD_LEVELS = 3
+/** 放大兜底：最多向更粗层钻取的层级数。高层级时逐级探到 0 会造成大量无谓的缓存查询。 */
+private const val TILE_FALLBACK_PARENT_LEVELS = 6
 /** 兜底子瓦片的最小屏幕边长（px）：太小就不值得画，避免无谓的缓存查询。 */
 private const val TILE_FALLBACK_MIN_SUBPX = 24f
+/** 跨层底衬最长保留时长（ms）：新层迟迟不齐（弱网/持续失败）时也不无限留着旧层。 */
+private const val UNDERLAY_MAX_MS = 1500L
 private const val MIN_ZOOM = 1f
 private const val MAX_ZOOM = 18f
 
@@ -163,6 +176,15 @@ val Petal = Basemap(
 val Basemaps = listOf(AmapVector, Petal, Osm)
 
 private fun worldSize(z: Int) = TILE_SIZE.toDouble() * 2.0.pow(z)
+
+/**
+ * Render one integer tile layer through the whole [z, z + 1) zoom interval.
+ * The previous rounded level made the tile range change repeatedly during a
+ * pinch, restarting tile work while the camera was still moving.
+ */
+private fun tileRenderLevel(zoom: Float, maxZoom: Int): Int =
+    floor(zoom.toDouble()).toInt().coerceIn(MIN_ZOOM.toInt(), minOf(MAX_ZOOM.toInt(), maxZoom))
+
 private fun projX(lon: Double, z: Int) = (lon + 180.0) / 360.0 * worldSize(z)
 private fun projY(lat: Double, z: Int): Double {
     val rad = lat.coerceIn(-85.05112878, 85.05112878) * PI / 180.0
@@ -188,7 +210,14 @@ private fun normY(lat: Double): Double {
  * 网格里的一格瓦片：只含整型瓦片坐标与 URL。屏幕位置在**绘制期**由当前相机算出，
  * 因此拖动/捏合时这个列表保持相等、不会每帧重建（对齐桌面端 MapView.qml 的 tileModel）。
  */
-private data class TileRef(val x: Int, val y: Int, val z: Int, val url: String)
+private data class TileRef(
+    val x: Int,
+    val y: Int,
+    val z: Int,
+    val url: String,
+    /** 0 = currently visible, 1 = prefetch. Visible tiles must enter the loader first. */
+    val priority: Int,
+)
 
 /**
  * 覆盖视口的整型瓦片网格。相机连续变化时网格保持相等 —— 依赖它的重组与加载副作用
@@ -281,11 +310,14 @@ private fun DrawScope.drawParentTile(
     var tx = tile.x
     var ty = tile.y
     var factor = 1
-    while (level > 0) {
+    // 逐层向粗层钻取，命中即停；最多 TILE_FALLBACK_PARENT_LEVELS 层。
+    var steps = 0
+    while (level > 0 && steps < TILE_FALLBACK_PARENT_LEVELS) {
         tx /= 2
         ty /= 2
         level--
         factor *= 2
+        steps++
         val parent = loader.peek(tileUrl(basemap, tx, ty, level)) ?: continue
         val sub = parent.width / factor
         if (sub <= 0) return false
@@ -412,9 +444,9 @@ fun MapScreen(
     active: Boolean = true,
 ) {
     val glass = LocalMapGlass.current
-    var centerLat by remember { mutableStateOf(35.0) }
-    var centerLon by remember { mutableStateOf(105.0) }
-    var zoom by remember { mutableStateOf(6f) }
+    var centerLat by remember { mutableDoubleStateOf(35.0) }
+    var centerLon by remember { mutableDoubleStateOf(105.0) }
+    var zoom by remember { mutableFloatStateOf(6f) }
     // 程序化镜头补间（对齐桌面端 moveCamera）：手势/跟随直接赋值，其余平滑过去。
     val reduceMotion = LocalReduceMotion.current
     val cameraScope = rememberCoroutineScope()
@@ -428,8 +460,11 @@ fun MapScreen(
     var initializedLocation by remember { mutableStateOf(false) }
     // 波前是否出现过：用于识别"波前消失"的时刻，自动归位并收起 HUD。
     var wavesShown by remember { mutableStateOf(false) }
-    // 用户操作地图的计数器：每次变化即重置"空闲自动归位"计时。
-    var interactionTick by remember { mutableStateOf(0) }
+    // 手势事件不进入 Compose Snapshot；每帧写 Snapshot 会额外唤醒所有观察者。
+    val interactionEvents = remember {
+        MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    }
+    var gestureActive by remember { mutableStateOf(false) }
     // Ordinary fixes never interrupt a user's camera. Only use the first fix if idle.
     LaunchedEffect(userLat, userLon) {
         if (!initializedLocation && userLat != null && userLon != null) {
@@ -445,20 +480,7 @@ fun MapScreen(
         }
     }
 
-    // 只有"还年轻"（发震在 60 min 内）的焦点/活跃事件才需要按帧重算波前半径。
-    var waveNow by remember { mutableStateOf(AppClock.now()) }
-    LaunchedEffect(focusEvent?.identity, focusEvent?.timestamp, waveEligible, active) {
-        if (!active || focusEvent == null || !waveEligible) return@LaunchedEffect
-        do {
-            waveNow = AppClock.now()
-            // 跟随时按显示帧率刷新，波前缩放的跟随才够细腻（不在一格一格地跳）；
-            // 未跟随时 100ms 足够画波前圆，避免整屏无谓重组。
-            if (following) withFrameNanos { } else delay(100)
-        } while (waveNow - focusEvent.timestamp <= WAVE_WINDOW_MS && !focusEvent.isCanceled)
-    }
-
     val focus = focusEvent
-    val waveSeconds = if (focus != null) (waveNow - focus.timestamp) / 1000.0 else -1.0
     // 波前"影响半径"：CSIS 降到可感下限（I）时的震中距。有意取代 kanameishi 的经验式
     // clamp(50·M², 200, 2000)。震级未知（<=0）时无法反解，退回量程上限，保证波前仍可见。
     val waveFadeKm = if (focus != null && focus.magnitude > 0.0) {
@@ -466,23 +488,43 @@ fun MapScreen(
     } else {
         WAVE_MAX_RADIUS_KM
     }
-    val (pKm, sKm) = if (waveEligible && focus != null && !focus.isCanceled && focus.timestamp > 0 && waveSeconds >= 0.0 &&
-        waveNow - focus.timestamp <= WAVE_WINDOW_MS
-    ) {
-        val (p, s) = waveRadii(focus.depth, waveSeconds)
-        // 透明度归零即视为隐藏：半径记 -1，取景与绘制都会跳过。
-        fun visibleRadius(r: Double): Double =
-            if (r > 0.0 && IntensityCalculator.waveOpacity(r, waveFadeKm) > 0.0) r else -1.0
-        visibleRadius(p) to visibleRadius(s)
-    } else {
-        -1.0 to -1.0
+    // 波前半径（km，隐藏记 -1）：只有"还年轻"（发震 60 min 内）的焦点/活跃事件才计算。
+    // 这两个值是高频的，只在协程（帧循环 / 相机跟随）与绘制期读取，绝不能在组合期读——
+    // 否则跟随预警时每帧都会重组整块地图，镜头切换（自动跟随）动画就会被拖顿。
+    val waveP = remember { mutableDoubleStateOf(-1.0) }
+    val waveS = remember { mutableDoubleStateOf(-1.0) }
+    LaunchedEffect(focusEvent?.identity, focusEvent?.timestamp, waveEligible, active) {
+        val event = focusEvent
+        if (!active || event == null || !waveEligible || event.timestamp <= 0) {
+            waveP.value = -1.0; waveS.value = -1.0
+            return@LaunchedEffect
+        }
+        while (true) {
+            val elapsed = AppClock.now() - event.timestamp
+            if (event.isCanceled || elapsed > WAVE_WINDOW_MS) {
+                waveP.value = -1.0; waveS.value = -1.0
+                break
+            }
+            if (elapsed < 0L) {
+                // 发震时刻在未来（模拟源会把时刻钳到 now+55s）：先隐藏，继续等它到点，不能就此退出。
+                waveP.value = -1.0; waveS.value = -1.0
+            } else {
+                val (p, s) = waveRadii(event.depth, elapsed / 1000.0)
+                // 透明度归零即视为隐藏：半径记 -1，取景与绘制都会跳过。
+                fun visibleRadius(r: Double): Double =
+                    if (r > 0.0 && IntensityCalculator.waveOpacity(r, waveFadeKm) > 0.0) r else -1.0
+                waveP.value = visibleRadius(p)
+                waveS.value = visibleRadius(s)
+            }
+            // 跟随时按显示帧率刷新，波前缩放的跟随才够细腻（不在一格一格地跳）；
+            // 未跟随时 100ms 足够画波前圆，避免整屏无谓重组。
+            if (following) withFrameNanos { } else delay(100)
+        }
     }
     // 波前半径显示值：向目标半径平滑追平（对齐桌面端 Behavior），避免目标值的台阶让圆一圈一圈地跳。
-    // 目标归零（隐藏）时立即归零，不做收缩动画。
-    var dispPKm by remember { mutableStateOf(0.0) }
-    var dispSKm by remember { mutableStateOf(0.0) }
-    val targetPKm by rememberUpdatedState(pKm)
-    val targetSKm by rememberUpdatedState(sKm)
+    // 目标归零（隐藏）时立即归零，不做收缩动画。同样只在绘制期读取。
+    var dispPKm by remember { mutableDoubleStateOf(0.0) }
+    var dispSKm by remember { mutableDoubleStateOf(0.0) }
     LaunchedEffect(active) {
         if (!active) return@LaunchedEffect
         var last = withFrameNanos { it }
@@ -490,18 +532,21 @@ fun MapScreen(
             val now = withFrameNanos { it }
             val dt = ((now - last) / 1_000_000.0).coerceAtLeast(0.0)
             last = now
-            val tp = targetPKm
-            val ts = targetSKm
+            val tp = waveP.value
+            val ts = waveS.value
             if (tp <= 0.0 && ts <= 0.0 && dispPKm <= 0.0 && dispSKm <= 0.0) { delay(100); continue }
+            if (gestureActive) {
+                // Camera movement already invalidates the map draw. Avoid doing
+                // a second full frame-rate state update for wave smoothing while
+                // the user is actively pinching.
+                delay(100)
+                continue
+            }
             val k = (dt / WAVE_SMOOTH_MS).coerceIn(0.0, 1.0)
             dispPKm = if (tp <= 0.0) 0.0 else dispPKm + (tp - dispPKm) * k
             dispSKm = if (ts <= 0.0) 0.0 else dispSKm + (ts - dispSKm) * k
         }
     }
-    val pOpacity = if (dispPKm > 0.0) IntensityCalculator.waveOpacity(dispPKm, waveFadeKm) else 0.0
-    val sOpacity = if (dispSKm > 0.0) IntensityCalculator.waveOpacity(dispSKm, waveFadeKm) else 0.0
-    // S 波径向渐变填充的不透明度：只在影响半径内可见（对齐 kanameishi 的 sWaveFill）。
-    val sFillOpacity = if (dispSKm > 0.0) IntensityCalculator.waveFillOpacity(dispSKm, waveFadeKm) else 0.0
 
     BoxWithConstraints(modifier = modifier.clip(RoundedCornerShape(0.dp))) {
         val mapHeight = maxHeight
@@ -551,7 +596,7 @@ fun MapScreen(
             else event.latitude to event.longitude
             val ex = normX(lon)
             val ey = normY(lat)
-            val radiusKm = focusRadiusKm(pKm, sKm)
+            val radiusKm = focusRadiusKm(waveP.value, waveS.value)
             val radius = radiusKm / (40075.0 * cos(lat * PI / 180.0).coerceAtLeast(0.05))
             val left = ex - radius
             val right = ex + radius
@@ -613,8 +658,11 @@ fun MapScreen(
             }
         }
         // 波前逐帧变化时跟随（直接赋值，保证跟手）；入场补间进行中不抢镜头。
-        LaunchedEffect(waveNow) {
-            if (following && hasFocus && !cameraAnimating) focusCamera()?.let { applyCamera(it, 0L, animate = false) }
+        // 用 snapshotFlow 在协程里读波前半径，避免把高频状态变成每帧重组的入口。
+        LaunchedEffect(Unit) {
+            snapshotFlow { waveP.value to waveS.value }.collect {
+                if (following && hasFocus && !cameraAnimating) focusCamera()?.let { applyCamera(it, 0L, animate = false) }
+            }
         }
         LaunchedEffect(widthPx, heightPx, topOcclusion) {
             if (following && hasFocus) focusCamera()?.let { applyCamera(it, 0L, animate = false) }
@@ -622,24 +670,25 @@ fun MapScreen(
         }
         // 波前全部消失（走完/淡出/事件结束）：若仍在跟随震中，自动回到我的位置（无定位则全国概览），
         // 并通知上层收起 HUD。用户已手动操作过镜头（following=false）时不抢镜头。
-        val hasWaves = pKm > 0.0 || sKm > 0.0
-        LaunchedEffect(hasWaves) {
-            if (hasWaves) {
-                wavesShown = true
-                onWavesStarted()
-            } else if (wavesShown) {
-                wavesShown = false
-                if (following) {
-                    following = false
-                    applyCamera(defaultCamera(), CAMERA_TWEEN_MS, animate = true)
+        LaunchedEffect(Unit) {
+            snapshotFlow { waveP.value > 0.0 || waveS.value > 0.0 }
+                .distinctUntilChanged()
+                .collect { hasWaves ->
+                    if (hasWaves) {
+                        wavesShown = true
+                        onWavesStarted()
+                    } else if (wavesShown) {
+                        wavesShown = false
+                        if (following) {
+                            following = false
+                            applyCamera(defaultCamera(), CAMERA_TWEEN_MS, animate = true)
+                        }
+                        onWavesFinished()
+                    }
                 }
-                onWavesFinished()
-            }
         }
         // 空闲自动归位：用户拖动/缩放后一段时间无操作且未在跟随事件，则回到默认视野。
-        LaunchedEffect(interactionTick) {
-            if (interactionTick == 0) return@LaunchedEffect
-            delay(idleResetMs)
+        val idleResetAction by rememberUpdatedState {
             if (!following) {
                 // 有活动预警时归位到预警震中并重新跟随；否则回到我的位置（无定位则全国概览）。
                 if (warningActive && focusEvent != null) {
@@ -651,31 +700,72 @@ fun MapScreen(
                 }
             }
         }
+        LaunchedEffect(Unit) {
+            interactionEvents.collectLatest {
+                gestureActive = true
+                delay(160L)
+                gestureActive = false
+            }
+        }
+        LaunchedEffect(Unit) {
+            interactionEvents.collectLatest {
+                delay(idleResetMs)
+                idleResetAction()
+            }
+        }
 
         // 相机→网格：只在跨过瓦片边界或整数层级时得到新值。拖动/捏合时相机连续变化，
         // 但这里返回相等对象，读它的重组与下面的加载副作用都不会被触发。
         val grid by remember(widthPx, heightPx, basemap.maxZoom) {
             derivedStateOf {
-                tileGrid(centerLat, centerLon, zoom, widthPx, heightPx, basemap.maxZoom, TILE_PREFETCH_MARGIN)
+                val tileZoom = tileRenderLevel(zoom, basemap.maxZoom).toFloat()
+                tileGrid(centerLat, centerLon, tileZoom, widthPx, heightPx, basemap.maxZoom, TILE_PREFETCH_MARGIN)
             }
         }
 
         val tiles = remember(grid, basemap.id) {
+            // Build a zero-margin grid as the loading priority boundary. The outer
+            // ring remains useful for panning, but it must not occupy all six load
+            // permits before the screen itself has any tiles.
+            val tileZoom = tileRenderLevel(zoom, basemap.maxZoom).toFloat()
+            val visibleGrid = tileGrid(
+                centerLat, centerLon, tileZoom, widthPx, heightPx,
+                basemap.maxZoom, margin = 0,
+            )
             val list = ArrayList<TileRef>()
             for (tx in grid.minX..grid.maxX) {
                 val wrappedX = ((tx % grid.n) + grid.n) % grid.n
                 for (ty in grid.minY..grid.maxY) {
                     if (ty < 0 || ty >= grid.n) continue
-                    list.add(TileRef(wrappedX, ty, grid.z, tileUrl(basemap, wrappedX, ty, grid.z)))
+                    val priority = if (
+                        tx in visibleGrid.minX..visibleGrid.maxX &&
+                        ty in visibleGrid.minY..visibleGrid.maxY
+                    ) 0 else 1
+                    list.add(TileRef(wrappedX, ty, grid.z, tileUrl(basemap, wrappedX, ty, grid.z), priority))
                 }
             }
+            list.sortBy { it.priority }
             list
         }
+        // Prefetch tiles are loaded for the next pan, but drawing them every
+        // frame only adds work outside the viewport. Keep loading and rendering
+        // sets separate.
+        val visibleTiles = remember(tiles) { tiles.filter { it.priority == 0 } }
 
         val images = remember { mutableStateMapOf<String, ImageBitmap>() }
-        val pending = remember { mutableSetOf<String>() }
+        // Jobs are keyed by URL so a tile that remains visible survives a grid
+        // update, while requests that moved outside the current view can be
+        // cancelled immediately.
+        val tileJobs = remember { mutableMapOf<String, Job>() }
         // 每个瓦片首次出现的时刻（ms），用于淡入（见绘制处的 alpha）。
         val tileAppearAt = remember { mutableStateMapOf<String, Long>() }
+        // 跨层底衬：换整数层级时把旧层整层留作底衬，新层画满再撤。避免黑屏与逐格拼贴，
+        // 也避免"每个缺口瓦片每帧去缓存里逐级找父/子瓦片"的探测风暴（对齐桌面端 underlayZ）。
+        var underlay by remember { mutableStateOf<List<TileRef>?>(null) }
+        var underlayAt by remember { mutableStateOf(0L) }
+        var lastTiles by remember { mutableStateOf<List<TileRef>>(emptyList()) }
+        var lastTileZ by remember { mutableStateOf(-1) }
+        val latestVisibleTiles by rememberUpdatedState(visibleTiles)
         val loadScope = rememberCoroutineScope()
         // 瓦片淡入的逐帧时钟：仅在跟随时或仍有瓦片处于淡入窗口内时按帧推进，
         // 空闲时降到 100ms 轮询，避免常驻 60Hz 重组。手动缩放/平移也能平滑淡入。
@@ -690,11 +780,36 @@ fun MapScreen(
                 } else {
                     delay(100)
                 }
+                // 新层画满并淡入完成后撤掉底衬；弱网下新层迟迟不齐则由超时兜底。
+                if (underlay != null) {
+                    val aged = AppClock.now() - underlayAt
+                    val complete = latestVisibleTiles.all { images.containsKey(it.url) }
+                    if ((complete && aged >= TILE_FADE_MS.toLong()) || aged >= UNDERLAY_MAX_MS) underlay = null
+                }
             }
         }
-        LaunchedEffect(tiles) {
-            val wanted = tiles.mapTo(HashSet()) { it.url }
-            // 丢弃移出视野的瓦片，避免状态表无限增长（解码位图仍由 TileLoader 的 LRU 持有）。
+        LaunchedEffect(tiles, active) {
+            if (!active) {
+                tileJobs.values.toList().forEach { it.cancel() }
+                tileJobs.clear()
+                return@LaunchedEffect
+            }
+            val z = grid.z
+            if (lastTileZ >= 0 && z != lastTileZ) {
+                // 换层：把刚才那一层整层降级为底衬（对齐桌面端 underlayZ），过渡期内一直垫在
+                // 新层之下，因此不会黑屏、也不会逐格拼贴。
+                underlay = lastTiles
+                underlayAt = AppClock.now()
+            }
+            lastTiles = tiles
+            lastTileZ = z
+            // 底衬位图在过渡期内不回收；撤掉底衬后，下一次瓦片集变化时自然释放。
+            val wanted = HashSet<String>(tiles.size * 2)
+            tiles.mapTo(wanted) { it.url }
+            underlay?.forEach { wanted.add(it.url) }
+            tileJobs.keys.toList().filterNot { it in wanted }.forEach { url ->
+                tileJobs.remove(url)?.cancel()
+            }
             images.keys.toList().forEach {
                 if (it !in wanted) {
                     images.remove(it)
@@ -703,25 +818,42 @@ fun MapScreen(
             }
             for (tile in tiles) {
                 val url = tile.url
-                if (images.containsKey(url) || !pending.add(url)) continue
-                // 用 composition 作用域而非本 effect：相机移动不会取消已在途的下载。
-                loadScope.launch {
+                if (images.containsKey(url) || tileJobs.containsKey(url)) continue
+
+                // Reattach an in-memory tile synchronously. This is what makes a
+                // zoom-out to a previously visited layer feel instant even after
+                // the UI's short-lived visible-image set was pruned.
+                val cached = tileLoader.peek(url)
+                if (cached != null) {
+                    images[url] = cached
+                    if (!tileAppearAt.containsKey(url)) tileAppearAt[url] = AppClock.now()
+                    continue
+                }
+
+                // 任务挂在 composition 作用域上；网格变化时会取消已经离开视口的下载。
+                var currentJob: Job? = null
+                currentJob = loadScope.launch {
                     // 冷缓存瓦片首访可能超时/被重置：失败后退避重试，用尽次数才放弃。
                     // 放弃后本轮不再重试；瓦片移出再进入视野时由 LaunchedEffect 重新发起。
-                    var attempt = 0
-                    while (true) {
-                        val bmp = tileLoader.load(url)
-                        if (bmp != null) {
-                            images[url] = bmp
-                            if (!tileAppearAt.containsKey(url)) tileAppearAt[url] = AppClock.now()
-                            break
+                    try {
+                        var attempt = 0
+                        while (true) {
+                            val bmp = tileLoader.load(url)
+                            if (bmp != null) {
+                                currentCoroutineContext().ensureActive()
+                                images[url] = bmp
+                                if (!tileAppearAt.containsKey(url)) tileAppearAt[url] = AppClock.now()
+                                break
+                            }
+                            attempt++
+                            if (attempt >= TILE_MAX_ATTEMPTS) break
+                            delay(TILE_RETRY_BASE_DELAY_MS shl (attempt - 1))
                         }
-                        attempt++
-                        if (attempt >= TILE_MAX_ATTEMPTS) break
-                        delay(TILE_RETRY_BASE_DELAY_MS shl (attempt - 1))
+                    } finally {
+                        if (tileJobs[url] === currentJob) tileJobs.remove(url)
                     }
-                    pending.remove(url)
                 }
+                tileJobs[url] = currentJob
             }
         }
 
@@ -733,7 +865,7 @@ fun MapScreen(
         fun screenX(lon: Double): Float =
             (widthPx / 2.0 + wrappedDelta(normX(lon) - normX(centerLon)) * TILE_SIZE * 2.0.pow(zoom.toDouble())).toFloat()
         fun screenY(lat: Double): Float {
-            val tz = zoom.roundToInt().coerceIn(MIN_ZOOM.toInt(), minOf(MAX_ZOOM.toInt(), basemap.maxZoom))
+            val tz = tileRenderLevel(zoom, basemap.maxZoom)
             val ts = 2f.pow(zoom - tz)
             return (projY(lat, tz) * ts - projY(centerLat, tz) * ts + heightPx / 2.0).toFloat()
         }
@@ -747,7 +879,7 @@ fun MapScreen(
                         stopCameraAnimation()
                         following = false
                         userMovedCamera = true
-                        interactionTick++
+                        interactionEvents.tryEmit(Unit)
                         val viewW = size.width.toFloat()
                         val viewH = size.height.toFloat()
 
@@ -790,23 +922,58 @@ fun MapScreen(
                 val originY = projY(centerLat, gz) * gScale - size.height / 2.0
                 val tileSizePx = scaledTile + 1f
                 val dst = IntSize(tileSizePx.roundToInt(), tileSizePx.roundToInt())
+
+                // 底衬：换层过渡期把旧层整层铺在最下面。整层直绘（每格一次查表），
+                // 比逐格向上/向下钻取缓存便宜两个数量级，也不会露黑。
+                val under = underlay
+                if (under != null) {
+                    val uz = under.firstOrNull()?.z ?: gz
+                    val uScale = 2f.pow(zoom - uz)
+                    val uTile = TILE_SIZE * uScale
+                    val uOriginX = projX(centerLon, uz) * uScale - size.width / 2.0
+                    val uOriginY = projY(centerLat, uz) * uScale - size.height / 2.0
+                    val uDst = IntSize((uTile + 1f).roundToInt(), (uTile + 1f).roundToInt())
+                    for (t in under) {
+                        val bmp = images[t.url] ?: continue
+                        val drawX = t.x * uTile - uOriginX
+                        val drawY = t.y * uTile - uOriginY
+                        if (drawX + uTile < 0.0 || drawX > size.width ||
+                            drawY + uTile < 0.0 || drawY > size.height
+                        ) continue
+                        drawImage(
+                            image = bmp,
+                            dstOffset = IntOffset(
+                                drawX.roundToInt(),
+                                drawY.roundToInt(),
+                            ),
+                            dstSize = uDst,
+                        )
+                    }
+                }
+
+                // Keep the prefetch ring available when a pan enters it, but
+                // skip every tile that is outside the current clip rectangle.
                 for (tile in tiles) {
                     val px = (tile.x * scaledTile - originX).toFloat()
                     val py = (tile.y * scaledTile - originY).toFloat()
+                    if (px + tileSizePx < 0f || px > size.width ||
+                        py + tileSizePx < 0f || py > size.height
+                    ) continue
                     val bmp = images[tile.url]
                     if (bmp == null) {
-                        drawFallbackTile(tile, px, py, tileSizePx, basemap, tileLoader, dst)
+                        // 有底衬垫着就不做逐格兜底探测：换层瞬间缺口瓦片极多，探测会退化成风暴。
+                        if (under == null) drawFallbackTile(tile, px, py, tileSizePx, basemap, tileLoader, dst)
                         continue
                     }
                     // 新瓦片淡入，掩盖跨层级清晰度突变造成的顿挫。
-                    // 底下有父瓦片可垫时才淡入（否则半透明会露出底色）；否则直接显示。
+                    // 底下有父瓦片/底衬可垫时才淡入（否则半透明会露出底色）；否则直接显示。
                     val appearAt = tileAppearAt[tile.url]
                     val alpha = if (appearAt != null) {
                         ((frameNow - appearAt).toFloat() / TILE_FADE_MS).coerceIn(0f, 1f)
                     } else {
                         1f
                     }
-                    if (alpha < 1f && drawFallbackTile(tile, px, py, tileSizePx, basemap, tileLoader, dst)) {
+                    if (alpha < 1f && (under != null || drawFallbackTile(tile, px, py, tileSizePx, basemap, tileLoader, dst))) {
                         drawImage(
                             image = bmp,
                             dstOffset = IntOffset(px.roundToInt(), py.roundToInt()),
@@ -830,6 +997,12 @@ fun MapScreen(
                 // px per km。墨卡托保角，水平/垂直同尺度：worldPx/360° ÷ (111.32·cosφ) km/°。
                 val cosLat = cos(event.latitude * PI / 180.0).coerceAtLeast(0.01)
                 val pxPerKm = (TILE_SIZE * 2.0.pow(gz.toDouble()) * gScale / 360.0) / (111.32 * cosLat)
+
+                // 波前不透明度在绘制期求值：dispPKm/dispSKm 由帧循环更新，若在组合期读会每帧重组整块地图。
+                val pOpacity = if (dispPKm > 0.0) IntensityCalculator.waveOpacity(dispPKm, waveFadeKm) else 0.0
+                val sOpacity = if (dispSKm > 0.0) IntensityCalculator.waveOpacity(dispSKm, waveFadeKm) else 0.0
+                // S 波径向渐变填充的不透明度：只在影响半径内可见（对齐 kanameishi 的 sWaveFill）。
+                val sFillOpacity = if (dispSKm > 0.0) IntensityCalculator.waveFillOpacity(dispSKm, waveFadeKm) else 0.0
 
                 // P/S 波前圆：反解走时表得到半径（km），-1 表示不画。半径用平滑后的显示值。
                 if (dispPKm > 0.0) {
@@ -880,15 +1053,15 @@ fun MapScreen(
             // 用户位置
             if (userLat != null && userLon != null) {
                 val (lat, lon) = shift(userLat, userLon)
-                val x = screenX(lon)
-                val y = screenY(lat)
+                val halfMarker = with(density) { 19.dp.toPx() }
                 Box(
                     modifier = Modifier
+                        // 相机坐标只在布局阶段读取（offset 的 lambda 在 measure/placement 执行），
+                        // 否则拖动/缩放时这里每帧都会在组合期读 zoom/center，重组整块地图。
                         .offset {
-                            IntOffset(
-                                (x - with(density) { 19.dp.toPx() }).roundToInt(),
-                                (y - with(density) { 19.dp.toPx() }).roundToInt(),
-                            )
+                            val x = screenX(lon)
+                            val y = screenY(lat)
+                            IntOffset((x - halfMarker).roundToInt(), (y - halfMarker).roundToInt())
                         }
                         .size(38.dp),
                     contentAlignment = androidx.compose.ui.Alignment.Center,
@@ -932,7 +1105,7 @@ fun MapScreen(
                 MapFloatingButton(AppIcon.Plus, dark, "放大地图", canZoomIn) {
                     following = false
                     userMovedCamera = true
-                    interactionTick++
+                    interactionEvents.tryEmit(Unit)
                     val target = (zoom.roundToInt() + 1).toFloat()
                         .coerceAtMost(minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
                     applyCamera(Camera(centerLat, centerLon, target), ZOOM_TWEEN_MS, animate = true)
@@ -941,7 +1114,7 @@ fun MapScreen(
                 MapFloatingButton(AppIcon.Minus, dark, "缩小地图", canZoomOut) {
                     following = false
                     userMovedCamera = true
-                    interactionTick++
+                    interactionEvents.tryEmit(Unit)
                     val target = (zoom.roundToInt() - 1).toFloat().coerceAtLeast(MIN_ZOOM)
                     applyCamera(Camera(centerLat, centerLon, target), ZOOM_TWEEN_MS, animate = true)
                 }
@@ -950,7 +1123,7 @@ fun MapScreen(
                     MapFloatingButton(AppIcon.Locate, dark, "定位到我的位置") {
                         following = false
                         userMovedCamera = true
-                        interactionTick++
+                        interactionEvents.tryEmit(Unit)
                         val position = shift(userLat, userLon)
                         applyCamera(Camera(position.first, position.second, 6f), CAMERA_TWEEN_MS, animate = true)
                     }

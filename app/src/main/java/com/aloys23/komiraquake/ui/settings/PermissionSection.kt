@@ -27,7 +27,7 @@ import com.aloys23.komiraquake.data.prefs.Settings
 import com.aloys23.komiraquake.model.WarningLevel
 import com.aloys23.komiraquake.service.RootHardening
 import com.aloys23.komiraquake.service.SystemPermissions
-import com.aloys23.komiraquake.service.WarningService
+import com.aloys23.komiraquake.service.WarningNotifier
 import com.aloys23.komiraquake.ui.components.AppIcon
 import com.aloys23.komiraquake.ui.components.Label
 import com.aloys23.komiraquake.ui.components.LucideIcon
@@ -104,7 +104,7 @@ internal fun PermissionSection(
                 summary = "渠道级兜底：允许该渠道在勿扰下出声",
                 onOpen = {
                     context.startActivitySafe(
-                        SystemPermissions.warningChannelSettings(context, WarningService.CHANNEL_ID),
+                        SystemPermissions.warningChannelSettings(context, WarningNotifier.CHANNEL_ID),
                     )
                 },
             )

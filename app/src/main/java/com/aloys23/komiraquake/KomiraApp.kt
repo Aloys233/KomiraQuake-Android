@@ -17,10 +17,11 @@ import com.aloys23.komiraquake.data.source.EewParser
 import com.aloys23.komiraquake.model.EarthquakeEvent
 import com.aloys23.komiraquake.service.AlertAnnouncer
 import com.aloys23.komiraquake.service.AlertSoundService
+import com.aloys23.komiraquake.service.AppForegroundGate
 import com.aloys23.komiraquake.service.DndController
 import com.aloys23.komiraquake.service.LocationService
 import com.aloys23.komiraquake.service.SystemNetworkGate
-import com.aloys23.komiraquake.service.WarningService
+import com.aloys23.komiraquake.service.WarningNotifier
 import com.aloys23.komiraquake.ui.map.TileCacheInterceptor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -44,6 +45,7 @@ class KomiraApp : Application() {
     override fun onCreate() {
         super.onCreate()
         container = AppContainer(this)
+        registerActivityLifecycleCallbacks(container.foregroundGate)
         container.start()
     }
 }
@@ -89,6 +91,9 @@ class AppContainer(private val context: Context) {
      */
     val networkGate = SystemNetworkGate(context)
 
+    /** 前后台闸门：目录 HTTP 轮询只在前台进行；实时 WS 长连接不受影响。 */
+    val foregroundGate = AppForegroundGate()
+
     /** 自定义 NTP 服务器上次应用的取值；用于变更时触发一次即时重校。 */
     private var lastCustomNtp: String? = null
     private var ntpStarted = false
@@ -101,6 +106,7 @@ class AppContainer(private val context: Context) {
             announcer.onWarning(event)
         },
         networkGate = networkGate,
+        foregroundGate = foregroundGate,
     )
 
     /** 1Hz 倒计时（秒），供 UI 与全屏预警使用。 */
@@ -181,8 +187,8 @@ class AppContainer(private val context: Context) {
             val access = com.aloys23.komiraquake.service.SystemPermissions.notificationsEnabled(context) to
                 com.aloys23.komiraquake.service.SystemPermissions.canUseFullScreenIntent(context)
             if (show != presented || access != presentationAccess) {
-                if (show?.identity != presented?.identity || !access.first) WarningService.stop(context)
-                if (show != null && access.first) WarningService.start(context, show)
+                if (show?.identity != presented?.identity || !access.first) WarningNotifier.dismiss(context)
+                if (show != null && access.first) WarningNotifier.show(context, show)
                 presented = show
                 presentationAccess = access
             }
@@ -194,7 +200,8 @@ class AppContainer(private val context: Context) {
                 }
             }
             if (events.isEmpty()) announcer.stop()
-            delay(250)
+            // 空闲时降频：无活动事件时 1s 一次即可；有事件时保持 250ms 供倒计时/震动/全屏。
+            delay(if (events.isEmpty() && presented == null) IDLE_POLL_MS else ACTIVE_POLL_MS)
         }
     }
 
@@ -203,7 +210,7 @@ class AppContainer(private val context: Context) {
     /** Collapse only the visual full-screen surface; alert output and HUD continue. */
     fun collapseAlert(identity: String? = null) {
         repository.dismissWarningOverlay(identity)
-        if (identity == null || repository.activeWarning.value?.identity == identity) WarningService.stop(context)
+        if (identity == null || repository.activeWarning.value?.identity == identity) WarningNotifier.dismiss(context)
     }
     fun dismissAlert(identity: String? = null) = collapseAlert(identity)
 
@@ -224,7 +231,14 @@ class AppContainer(private val context: Context) {
         repository.clearActiveWarning(key)
         mutedEvents.remove(key)
         if (repository.activeWarnings.value.isEmpty()) {
-            vibrator.stop(); dnd.release(); WarningService.stop(context)
+            vibrator.stop(); dnd.release(); WarningNotifier.dismiss(context)
         }
+    }
+
+    private companion object {
+        /** 有活动事件时的编排周期（倒计时/震动/全屏所需）。 */
+        const val ACTIVE_POLL_MS = 250L
+        /** 空闲时的降频周期：无预警时无倒计时可跑，1s 足够感知新事件。 */
+        const val IDLE_POLL_MS = 1000L
     }
 }

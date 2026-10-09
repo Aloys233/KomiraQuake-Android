@@ -1,6 +1,7 @@
 package com.aloys23.komiraquake.data.source.pancakes
 
 import com.aloys23.komiraquake.core.AppClock
+import com.aloys23.komiraquake.core.ForegroundGate
 import com.aloys23.komiraquake.core.IntensityStandard
 import com.aloys23.komiraquake.core.NetworkGate
 import com.aloys23.komiraquake.data.source.EarthquakeSource
@@ -48,6 +49,8 @@ class PancakesSource(
     private val callFactory: Call.Factory = okHttp,
     /** 网络感知重连；默认恒在线，退化为固定退避。 */
     private val networkGate: NetworkGate = NetworkGate.AlwaysOnline,
+    /** 前后台闸门：目录 HTTP 轮询只在前台进行；实时 WS 长连接不受影响。 */
+    private val foregroundGate: ForegroundGate = ForegroundGate.AlwaysForeground,
 ) : EarthquakeSource {
     override val id: String get() = SourceIds.PANCAKES
     private val lock = Any()
@@ -80,6 +83,9 @@ class PancakesSource(
         connect(session)
         pollJob = scope.launch(Dispatchers.IO) {
             while (isActive) {
+                // 后台不刷新目录；回到前台由 awaitForeground 立即唤醒并刷一次。
+                foregroundGate.awaitForeground()
+                if (!current(session)) return@launch
                 // 断网时不发注定失败的目录请求，等恢复后由 awaitOnline 立刻唤醒。
                 if (networkGate.awaitOnline()) retryCount = 0
                 pollDirectory(session)

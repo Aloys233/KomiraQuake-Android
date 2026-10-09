@@ -6,9 +6,7 @@
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.VIBRATE" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
@@ -47,12 +45,6 @@
             android:taskAffinity=""
             android:theme="@style/Theme.KomiraQuake.Warning" />
 
-        <service
-            android:name=".service.WarningService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
-
-        <!-- 常驻守护服务：进程存活锚点，类型 specialUse 以便从 BOOT_COMPLETED 拉起 -->
         <service
             android:name=".service.GuardService"
             android:exported="false"
