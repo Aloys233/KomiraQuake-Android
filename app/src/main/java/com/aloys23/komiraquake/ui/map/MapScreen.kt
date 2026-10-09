@@ -70,6 +70,7 @@ import com.aloys23.komiraquake.ui.components.AppIcon
 import com.aloys23.komiraquake.ui.components.LucideIcon
 import com.aloys23.komiraquake.ui.components.Label
 import com.aloys23.komiraquake.ui.components.LocalMapGlass
+import com.aloys23.komiraquake.ui.components.liquid.glassForegroundColor
 import com.aloys23.komiraquake.ui.components.mapGlass
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.blur.layerBackdrop
@@ -1169,7 +1170,6 @@ private fun MapScaleBar(
     val zoom = cameraZoom()
     val centerLat = cameraLat()
     val density = LocalDensity.current
-    val scheme = MiuixTheme.colorScheme
     val cosLat = cos(centerLat * PI / 180.0).coerceAtLeast(0.01)
     val pxPerKm = (TILE_SIZE * 2.0.pow(zoom.toDouble()) / 360.0) / (111.32 * cosLat)
     val targetKm = with(density) { 70.dp.toPx() } / pxPerKm
@@ -1185,7 +1185,7 @@ private fun MapScaleBar(
         Column(horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally) {
             com.aloys23.komiraquake.ui.components.Label(
                 if (scaleKm < 1) "${(scaleKm * 1000).roundToInt()} m" else "${scaleKm.roundToInt()} km",
-                scheme.onSurface,
+                glassForegroundColor(dark),
                 size = 10.sp,
             )
             Spacer(Modifier.height(2.dp))
@@ -1193,7 +1193,7 @@ private fun MapScaleBar(
                 modifier = Modifier
                     .width(scaleBarWidth)
                     .height(3.dp)
-                    .background(scheme.onSurface),
+                    .background(glassForegroundColor(dark)),
             )
         }
     }
@@ -1205,12 +1205,12 @@ private fun MapFloatingButton(icon: AppIcon, dark: Boolean, description: String,
     val tint = when {
         !enabled -> MiuixTheme.colorScheme.disabledOnSurface
         selected -> MiuixTheme.colorScheme.primary
-        else -> MiuixTheme.colorScheme.onSurface
+        else -> glassForegroundColor(dark)
     }
-    Box(Modifier.mapGlass(dark, RoundedCornerShape(14.dp))) {
+    Box(Modifier.mapGlass(dark, CircleShape)) {
         IconButton(
             onClick = onClick, enabled = enabled, backgroundColor = Color.Transparent,
-            cornerRadius = 14.dp, minWidth = 48.dp, minHeight = 48.dp,
+            cornerRadius = 24.dp, minWidth = 48.dp, minHeight = 48.dp,
         ) { LucideIcon(icon, tint, description) }
     }
 }

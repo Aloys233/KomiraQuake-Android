@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastCoerceIn
 import androidx.compose.ui.util.lerp
 import com.aloys23.komiraquake.ui.components.liquid.InnerShadow
+import com.aloys23.komiraquake.ui.components.liquid.glassContainerColor
 import com.aloys23.komiraquake.ui.components.liquid.innerShadow
 import com.aloys23.komiraquake.ui.components.liquid.lens
 import com.aloys23.komiraquake.ui.components.liquid.rememberCombinedBackdrop
@@ -229,9 +230,8 @@ fun FloatingBottomBar(
     val pillShape = remember { CircleShape }
     // 选中态用应用主题强调色（蓝色）；容器与未选中项保持中性。
     val accentColor = MiuixTheme.colorScheme.primary
-    val tabContentColor = if (isInDark) Color.White.copy(alpha = 0.6f) else Color(0xFF1C1C1E).copy(alpha = 0.55f)
-    val containerColor =
-        if (isInDark) Color(0xFF1F2124).copy(alpha = 0.45f) else Color.White.copy(alpha = 0.55f)
+    val tabContentColor = if (isInDark) Color.White.copy(alpha = 0.94f) else Color(0xFF1C1C1E).copy(alpha = 0.86f)
+    val containerColor = glassContainerColor(isInDark)
 
     val tabsBackdrop = rememberLayerBackdrop()
     val density = LocalDensity.current
@@ -481,11 +481,10 @@ fun FloatingBottomBar(
                             },
                             onDrawSurface = {
                                 val progress = dampedDragAnimation.pressProgress
-                                drawRect(
-                                    color = if (!isInDark) Color.Black.copy(alpha = 0.1f) else Color.White.copy(alpha = 0.1f),
-                                    alpha = 1f - progress,
-                                )
-                                drawRect(Color.Black.copy(alpha = 0.03f * progress))
+                                // Dark scrim in both themes: over the dark bar a *white* scrim glows and
+                                // reads as a light/white selected mask instead of a neutral one.
+                                drawRect(Color.Black, alpha = (1f - progress) * 0.06f)
+                                drawRect(Color.Black, alpha = 0.03f * progress)
                             },
                         )
                         .innerShadow(shape = pillShape) {

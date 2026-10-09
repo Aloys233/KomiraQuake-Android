@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.verticalScroll
@@ -41,6 +42,7 @@ import com.aloys23.komiraquake.model.ConnectionStatus
 import com.aloys23.komiraquake.model.DataSourceInfo
 import com.aloys23.komiraquake.model.EarthquakeEvent
 import com.aloys23.komiraquake.model.WarningLevel
+import com.aloys23.komiraquake.ui.components.liquid.glassForegroundColor
 import com.aloys23.komiraquake.ui.theme.AppFontFamily
 import com.aloys23.komiraquake.ui.theme.LocalAppDark
 import com.aloys23.komiraquake.ui.theme.SeismicColors
@@ -63,10 +65,11 @@ fun NtpClockLabel(info: ClockInfo, dark: Boolean, modifier: Modifier = Modifier)
     LaunchedEffect(Unit) { while (true) { nowMs = AppClock.now(); delay(200) } }
     val synced = info.enabled && info.state == ClockState.SYNCED
     val color = if (synced) SeismicColors.clockSynced(dark) else SeismicColors.clockUnsynced(dark)
-    Column(modifier.mapGlass(dark, RoundedCornerShape(14.dp)).padding(horizontal = 12.dp, vertical = 8.dp)) {
+    Row(modifier.mapGlass(dark, CircleShape).padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Label(ClockFormat.ZONE_LABEL, glassForegroundColor(dark), 12.sp)
         Label(ClockFormat.utc8Stamp(nowMs), color, 12.sp, bold = true)
-        Label("${ClockFormat.ZONE_LABEL} · ${if (synced) "已校准" else "未同步"}",
-            MiuixTheme.colorScheme.onSurfaceSecondary, 12.sp)
     }
 }
 
@@ -87,12 +90,12 @@ fun SourceStatusLabel(info: DataSourceInfo, dark: Boolean, modifier: Modifier = 
         ConnectionStatus.ERROR -> "连接异常"
         ConnectionStatus.DISCONNECTED -> "未连接"
     }
-    Row(modifier.fillMaxWidth().mapGlass(dark, RoundedCornerShape(14.dp)).padding(horizontal = 12.dp, vertical = 8.dp),
+    Row(modifier.fillMaxWidth().mapGlass(dark, CircleShape).padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         LucideIcon(AppIcon.Radio, color, modifier = Modifier.size(16.dp))
-        Label("数据源", MiuixTheme.colorScheme.onSurfaceSecondary, 12.sp)
+        Label("数据源", glassForegroundColor(dark), 12.sp)
         Label(info.name, color, 12.sp, bold = true, maxLines = 1, modifier = Modifier.weight(1f))
-        Label(status, MiuixTheme.colorScheme.onSurfaceSecondary, 11.sp, maxLines = 1)
+        Label(status, glassForegroundColor(dark), 11.sp, maxLines = 1)
     }
 }
 
