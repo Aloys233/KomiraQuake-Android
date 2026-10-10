@@ -1,6 +1,7 @@
 package com.aloys23.komiraquake.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -51,14 +52,15 @@ import kotlinx.coroutines.delay
 import top.yukonga.miuix.kmp.basic.Button
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Card
-import top.yukonga.miuix.kmp.basic.CardDefaults
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.squircle.squircleBorder
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 /** 发震时刻：与校时时钟一致，固定渲染为 UTC+8 的完整时刻。 */
 internal fun quakeTimeText(timestamp: Long): String = ClockFormat.utc8Stamp(timestamp)
+
+/** JMA 细分震度（5弱/5强/5-/5+）判定。顶层预编译：列表每个徽章每次组合都新建 Regex 会重新编译 pattern。 */
+private val JmaModifierRegex = Regex("^[0-9]+[弱强+\\-]$")
 
 /** Fixed UTC+8, actual clock status. Never treat no event as a safety indication. */
 @Composable
@@ -76,21 +78,27 @@ fun NtpClockLabel(info: ClockInfo, dark: Boolean, modifier: Modifier = Modifier)
 }
 
 /**
- * 左下角数据源状态徽章（对齐桌面端 sourceBadge）：radio 图标与名称按连接状态着色。
- * 按内容宽度排布，不显示状态文本。
+ * 左下角数据源状态徽章：逐源显示各自连接状态（每个源名按它自己的状态着色）。
+ * 之前用聚合状态给整串源名上色，会出现「模拟源没连上、却因别的源在线而被染绿」。
+ * 传入的 [sources] 应只含「已启用且已配置」的源。按内容宽度排布，不显示状态文本。
  */
 @Composable
-fun SourceStatusLabel(info: DataSourceInfo, dark: Boolean, modifier: Modifier = Modifier) {
-    val color = when (info.status) {
-        ConnectionStatus.CONNECTED -> SeismicColors.clockSynced(dark)
-        ConnectionStatus.CONNECTING -> SeismicColors.severity(WarningLevel.WATCH, dark)
-        else -> SeismicColors.clockUnsynced(dark)
-    }
+fun SourceStatusLabel(sources: List<DataSourceInfo>, dark: Boolean, modifier: Modifier = Modifier) {
     Row(modifier.mapGlass(dark, CircleShape).padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        LucideIcon(AppIcon.Radio, color, modifier = Modifier.size(16.dp))
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(7.dp)) {
         Label("数据源", glassForegroundColor(dark), 12.sp)
-        Label(info.name, color, 12.sp, bold = true, maxLines = 1)
+        if (sources.isEmpty()) {
+            Label("无启用数据源", glassForegroundColor(dark), 12.sp)
+        }
+        sources.forEachIndexed { index, info ->
+            val color = when (info.status) {
+                ConnectionStatus.CONNECTED -> SeismicColors.clockSynced(dark)
+                ConnectionStatus.CONNECTING -> SeismicColors.severity(WarningLevel.WATCH, dark)
+                else -> SeismicColors.clockUnsynced(dark)
+            }
+            if (index > 0) Label("·", glassForegroundColor(dark), 12.sp, maxLines = 1)
+            Label(info.name, color, 12.sp, bold = true, maxLines = 1)
+        }
     }
 }
 
@@ -139,7 +147,7 @@ fun IntensityBadge(intensity: String, color: Color, size: Dp = 56.dp, showLabel:
     modifier: Modifier = Modifier, label: String = "预估烈度", source: String = "") {
     val foreground = SeismicColors.on(color)
     // JMA 细分震度（5弱/5强/5-/5+）首位数字特大、修饰字较小。
-    val modifierValue = Regex("^[0-9]+[弱强+\\-]$").matches(intensity)
+    val modifierValue = JmaModifierRegex.matches(intensity)
     val valueSize = when {
         intensity.length <= 2 -> size.value * 0.60f
         intensity.length == 3 -> size.value * 0.52f
@@ -217,44 +225,43 @@ fun QuakeHudCard(event: EarthquakeEvent, dark: Boolean, modifier: Modifier = Mod
 /** kanameishi 式列表项：左侧烈度色块，右侧「震中 / 发震时刻 / 震级·深度·距离」。点击整卡进入详情页。 */
 @Composable
 fun EarthquakeTile(event: EarthquakeEvent, dark: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier,
-    fillHeight: Boolean = false, standard: IntensityStandard = IntensityStandard.CSIS) {
+    standard: IntensityStandard = IntensityStandard.CSIS) {
     // 列表固定展示「震源最大烈度」；本地预估烈度只出现在 HUD / 全屏预警。
     val intensity = listIntensityDisplayOf(event, standard)
     val onSurface = MiuixTheme.colorScheme.onSurface
     val secondary = MiuixTheme.colorScheme.onSurfaceSecondary
-    val radius = 16.dp
-    Box(modifier.fillMaxWidth()) {
-        Card(Modifier.fillMaxWidth()
-            .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier)
-            .clickable(role = Role.Button, onClickLabel = "查看${event.location}详情", onClick = onClick),
-            cornerRadius = radius,
-            // 比默认 surfaceContainer 更突出的底色，让每项读起来是独立卡片（对齐桌面端）。
-            colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceContainerHighest),
-            insideMargin = PaddingValues(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                IntensityBadge(intensity.text, intensity.color, size = 60.dp, label = intensity.shortLabel)
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        if (event.isActive) Box(Modifier.size(6.dp).clip(RoundedCornerShape(3.dp)).background(MiuixTheme.colorScheme.primary))
-                        Label(event.location, onSurface, 16.sp, bold = true, maxLines = 2,
-                            modifier = Modifier.weight(1f))
-                    }
-                    // 发震时刻独占一行，始终完整显示。
-                    Label(quakeTimeText(event.timestamp) + "  UTC+8", secondary, 12.sp, maxLines = 1)
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Label("M %.1f".format(event.magnitude), onSurface, 15.sp, bold = true)
-                        Label("深度 %.0f km".format(event.depth),
-                            secondary, 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
-                        // 数据源标注（提供方·机构）：次要信息，放在震级/深度行右侧。
-                        Label(event.sourceTag, secondary, 11.sp, maxLines = 1)
-                    }
-                }
+    val shape = RoundedCornerShape(16.dp)
+    // 刻意不用 miuix Card：Card 的圆角 surface 在 Android 13+ 上总是走「离屏图层 + AGSL 运行时
+    // 着色器」（squircleSurface 不读 LocalSquircleEnabled），列表滚动时逐帧合成离屏层会掉帧。
+    // 这里用等价的轻量圆角底 + 1px 描边，视觉一致但只走一次普通绘制。
+    Row(modifier.fillMaxWidth()
+        .clip(shape)
+        // 比默认 surfaceContainer 更突出的底色，让每项读起来是独立卡片（对齐桌面端）。
+        .background(MiuixTheme.colorScheme.surfaceContainerHighest)
+        // 1px 描边：让每个事件读起来是独立卡片（对齐桌面端 EventTile 边框）。
+        .border(1.dp, MiuixTheme.colorScheme.outline, shape)
+        .clickable(role = Role.Button, onClickLabel = "查看${event.location}详情", onClick = onClick)
+        .padding(16.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        IntensityBadge(intensity.text, intensity.color, size = 60.dp, label = intensity.shortLabel)
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                if (event.isActive) Box(Modifier.size(6.dp).clip(RoundedCornerShape(3.dp)).background(MiuixTheme.colorScheme.primary))
+                Label(event.location, onSurface, 16.sp, bold = true, maxLines = 2,
+                    modifier = Modifier.weight(1f))
+            }
+            // 发震时刻独占一行，始终完整显示。
+            Label(quakeTimeText(event.timestamp) + "  UTC+8", secondary, 12.sp, maxLines = 1)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Label("M %.1f".format(event.magnitude), onSurface, 15.sp, bold = true)
+                Label("深度 %.0f km".format(event.depth),
+                    secondary, 12.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                // 数据源标注（提供方·机构）：次要信息，放在震级/深度行右侧。
+                Label(event.sourceTag, secondary, 11.sp, maxLines = 1)
             }
         }
-        // 覆盖一层与卡片同形状的 1px 描边，让每个事件读起来是独立卡片（对齐桌面端 EventTile 边框）。
-        Box(Modifier.matchParentSize().squircleBorder(1.dp, MiuixTheme.colorScheme.outline, radius, 0f))
     }
 }
 

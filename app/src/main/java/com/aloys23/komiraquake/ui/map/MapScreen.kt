@@ -65,6 +65,7 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
 import com.aloys23.komiraquake.ui.components.AppIcon
 import com.aloys23.komiraquake.ui.components.LucideIcon
 import com.aloys23.komiraquake.ui.components.Label
@@ -129,6 +130,8 @@ private const val CAMERA_TWEEN_MS = 420L
 private const val ZOOM_TWEEN_MS = 180L
 /** 波前半径显示平滑时长（ms）：对齐桌面端 Behavior，掩盖目标值的台阶。 */
 private const val WAVE_SMOOTH_MS = 120.0
+/** 波前圆与可用区边界之间的余量（dp）：让 2px 描边和震中 X 标记不贴边、不被裁。 */
+private val WAVE_FIT_MARGIN_DP = 8.dp
 
 /** 目标镜头（中心经纬度 + 缩放）。 */
 private data class Camera(val lat: Double, val lon: Double, val zoom: Float)
@@ -138,7 +141,7 @@ private data class Camera(val lat: Double, val lon: Double, val zoom: Float)
  *
  * 事件 identity 在实时报次之间保持不变，但震中坐标/发震时刻可能被修正；同时 Compose
  * 首帧的视口和 HUD 遮挡值可能还未稳定。它们都必须让取景副作用重新计算目标 zoom，不能
- * 只依赖 cameraRequest（cameraRequest 只在显式聚焦时递增）。
+ * 只依赖 cameraRequest（cameraRequest 在新事件和显式聚焦时递增）。
  */
 internal data class FocusCameraKey(
     val identity: String?,
@@ -174,6 +177,36 @@ internal fun focusCameraKey(
     heightPx = heightPx,
     topOcclusionPx = topOcclusionPx,
 )
+
+/**
+ * 只描述“是否应该重新开始镜头补间”的输入。
+ *
+ * 震中坐标、震级、窗口尺寸和 HUD 遮挡区变化仍然会让 [FocusCameraKey] 变化，从而重算目标
+ * 镜头；但它们不应该把同一事件的 420ms 补间反复从头启动。新事件的 identity 或显式聚焦
+ * request 变化时才建立新的动画边界。
+ */
+internal data class CameraAnimationKey(
+    val identity: String?,
+    val request: Long,
+    val hasFocus: Boolean,
+)
+
+internal fun cameraAnimationKey(
+    event: EarthquakeEvent?,
+    request: Long,
+    hasFocus: Boolean,
+) = CameraAnimationKey(
+    identity = if (hasFocus) event?.identity else null,
+    request = request,
+    hasFocus = hasFocus,
+)
+
+/** 只有当前焦点仍是产生波前的事件，波前结束才允许把镜头归位。 */
+internal fun shouldFinishWavesForFocus(
+    wavesEventIdentity: String?,
+    currentFocusIdentity: String?,
+    wavesShown: Boolean,
+): Boolean = wavesShown && wavesEventIdentity != null && wavesEventIdentity == currentFocusIdentity
 
 /** OutCubic 缓动：与桌面端 Easing.OutCubic 一致。 */
 private fun easeOutCubic(t: Double): Double { val u = 1.0 - t; return 1.0 - u * u * u }
@@ -492,8 +525,141 @@ private fun waveRadii(depthKm: Double, seconds: Double): Pair<Double, Double> {
  * 聚焦取景半径（km）：有活跃波前时跟随较大的那一片并设 100 km 下限，避免 t≈0 时贴得过近；
  * P/S 全部隐藏（历史事件，或已淡出）时用固定 300 km。
  */
+private const val FOCUS_MIN_RADIUS_KM = 100.0
+private const val FOCUS_FALLBACK_RADIUS_KM = 300.0
+
 internal fun focusRadiusKm(pKm: Double, sKm: Double): Double =
-    if (pKm < 0.0 && sKm < 0.0) 300.0 else maxOf(100.0, pKm, sKm)
+    if (pKm < 0.0 && sKm < 0.0) FOCUS_FALLBACK_RADIUS_KM
+    else maxOf(FOCUS_MIN_RADIUS_KM, pKm, sKm)
+
+/**
+ * 屏幕上的一个轴对齐矩形（px，左上原点）。用作波前取景的可用区，或悬浮元素的遮挡区。
+ * 公开类型：作为 [MapScreen] 的参数类型出现。
+ */
+data class ScreenRect(val l: Float, val t: Float, val r: Float, val b: Float) {
+    val w: Float get() = r - l
+    val h: Float get() = b - t
+    val cx: Float get() = (l + r) / 2f
+    val cy: Float get() = (t + b) / 2f
+
+    /** 面积交叠为 true；仅贴边（相切）不算交叠。 */
+    fun hits(o: ScreenRect): Boolean = o.l < r && o.r > l && o.t < b && o.b > t
+
+    /** 向内收缩 [by]，返回保证非空的自身副本（长边被压到最小 [MIN_FREE_EDGE]）。 */
+    fun shrink(by: Float): ScreenRect {
+        val nx = (w - 2 * by).coerceAtLeast(MIN_FREE_EDGE)
+        val ny = (h - 2 * by).coerceAtLeast(MIN_FREE_EDGE)
+        val c = ScreenRect(l + (w - nx) / 2f, t + (h - ny) / 2f, 0f, 0f)
+        return ScreenRect(c.l, c.t, c.l + nx, c.t + ny)
+    }
+
+    companion object {
+        /** 可用区最小的边长（px）：比这更窄的矩形放不下任何有意义的内容。 */
+        const val MIN_FREE_EDGE = 80f
+    }
+}
+
+/**
+ * 在 [w]×[h] 屏幕里找出**不与任何遮挡物交叠、且面积最大**的轴对齐矩形。
+ *
+ * 悬浮控件的形状是复合的（顶部 HUD 通栏、底栏居中留白、左下徽章、右侧工具条），
+ * 用「整宽减底栏」这种通栏内缩会在中间算不足、在两侧又算过度保守。
+ * 这里改为在坐标压缩后的网格上穷举：遮挡物只有四五个时，
+ * 候选矩形数 = O(|xs|²·|ys|²) ≤ 数百，纯计算开销可忽略。
+ *
+ * 返回值一定不与任何 [occluders] 交叠；若整屏都被挡住，退化为全屏（交给
+ * [focusZoomForRect] 的 clamp 兜底），不会返回空矩形。
+ */
+internal fun largestFreeRect(w: Float, h: Float, occluders: List<ScreenRect>): ScreenRect {
+    // 只保留真正压在屏幕内的遮挡，避免屏幕外的负坐标撑出无意义的候选。
+    val inside = occluders.filter { it.w > 0f && it.h > 0f && it.l < w && it.r > 0f && it.t < h && it.b > 0f }
+    if (inside.isEmpty()) return ScreenRect(0f, 0f, w, h)
+
+    val xs = sortedSetOf(0f, w).apply { inside.forEach { add(it.l.coerceIn(0f, w)); add(it.r.coerceIn(0f, w)) } }
+    val ys = sortedSetOf(0f, h).apply { inside.forEach { add(it.t.coerceIn(0f, h)); add(it.b.coerceIn(0f, h)) } }
+    val xa = xs.toList()
+    val ya = ys.toList()
+
+    var best = ScreenRect(0f, 0f, 0f, 0f)
+    var bestArea = 0f
+    for (i0 in xa.indices) {
+        for (i1 in i0 + 1 until xa.size) {
+            val rw = xa[i1] - xa[i0]
+            if (rw < ScreenRect.MIN_FREE_EDGE) continue
+            for (j0 in ya.indices) {
+                for (j1 in j0 + 1 until ya.size) {
+                    val rh = ya[j1] - ya[j0]
+                    if (rh < ScreenRect.MIN_FREE_EDGE) continue
+                    val area = rw * rh
+                    if (area <= bestArea) continue
+                    val cand = ScreenRect(xa[i0], ya[j0], xa[i1], ya[j1])
+                    if (inside.any { it.hits(cand) }) continue
+                    best = cand
+                    bestArea = area
+                }
+            }
+        }
+    }
+    // 整屏都被占满时枚举不出合格矩形：退回整屏，由 focusZoomForRect 的 clamp 兜底，
+    // 绝不返回空矩形（空矩形的中心是 (0,0)，会把震中甩到屏幕角上）。
+    return if (bestArea > 0f) best else ScreenRect(0f, 0f, w, h)
+}
+
+/**
+ * 让半径 [radiusKm] 的波前圆完整落在 [rect] 内所需的连续 zoom。
+ *
+ * 半径先在 z=0 下换算成像素，再取宽高比例的较小值——与桌面端 MapView.frameEvent
+ * 的取景公式保持一致，不能退化成固定 zoom。[rect] 是已经扣除悬浮遮挡、并且
+ * 预留了 [marginPx] 余量的可用区。
+ */
+internal fun focusZoomForRect(
+    radiusKm: Double,
+    latitude: Double,
+    rect: ScreenRect,
+    maxZoom: Int = MAX_ZOOM.toInt(),
+    marginPx: Float = 0f,
+): Float {
+    val cosLat = cos(latitude * PI / 180.0).coerceAtLeast(0.01)
+    val radiusAtZeroZoomPx = radiusKm.coerceAtLeast(FOCUS_MIN_RADIUS_KM) * TILE_SIZE /
+        (360.0 * 111.32 * cosLat)
+    val availW = rect.shrink(marginPx).w.coerceAtLeast(ScreenRect.MIN_FREE_EDGE).toDouble()
+    val availH = rect.shrink(marginPx).h.coerceAtLeast(ScreenRect.MIN_FREE_EDGE).toDouble()
+    val scale = minOf(availW / (2.0 * radiusAtZeroZoomPx), availH / (2.0 * radiusAtZeroZoomPx))
+    return (ln(scale.coerceAtLeast(1.0)) / LN2).toFloat()
+        .coerceIn(MIN_ZOOM, minOf(MAX_ZOOM, maxZoom.toFloat()))
+}
+
+/**
+ * 让震中落在 [rect] 正中心所需的**归一化世界坐标**（[eventX]/[eventY] 与返回值同为 [0,1]）。
+ *
+ * [worldPx] 是当前 zoom 下的世界宽度。屏幕中心与矩形中心的像素差要折算回世界坐标，
+ * 因此镜头中心要朝矩形中心方向偏移。这与桌面端
+ * `unprojLon((minX + maxX)/2 - (left - right)/(2*scale))` 同向：
+ * 右侧遮挡更多时镜头中心右偏，震中落回剩余可视区中心。
+ */
+internal fun focusCameraCenter(
+    eventX: Double,
+    eventY: Double,
+    worldPx: Double,
+    rect: ScreenRect,
+    viewWidthPx: Float,
+    viewHeightPx: Float,
+): Pair<Double, Double> {
+    val dxPx = rect.cx - viewWidthPx / 2f
+    val dyPx = rect.cy - viewHeightPx / 2f
+    return (eventX - dxPx / worldPx) to (eventY - dyPx / worldPx)
+}
+
+/**
+ * 波前是否已经大到「再往外扩也看不见了」，此时应当冻结镜头、保持当前视野。
+ *
+ * [IntensityCalculator.waveOpacity] 在 radius 超过 CSIS 可感半径（[fadeKm]）后并不立刻归零，
+ * 而是维持 0.25 直到约 8000 km。若不冻结，镜头会一路缩到 MIN_ZOOM 去装一个几乎看不见的圈。
+ * 冻结点取 radiusKm >= fadeKm（等价 opacity 已降到 0.25）；之后波前彻底消失时，
+ * 由「波前消失 → 回到默认视野」路径接管归位。
+ */
+internal fun shouldHoldCamera(pKm: Double, sKm: Double, fadeKm: Double): Boolean =
+    fadeKm > 0.0 && maxOf(pKm, sKm) >= fadeKm
 
 /**
  * Compose 自绘栅格瓦片地图。《NATIVE_PORT_SPEC》 §8 / §12。
@@ -519,6 +685,12 @@ fun MapScreen(
     /** 与桌面端右侧 layers 按钮一致；详情地图不提供时隐藏该按钮。 */
     onCycleBasemap: (() -> Unit)? = null,
     topOcclusion: androidx.compose.ui.unit.Dp = 310.dp,
+    /**
+     * 上层实测出来的悬浮控件遮挡矩形（**窗口坐标** px，左上原点）。
+     * 波前取景会挑「不与任何遮挡交叠的最大空白矩形」把圆放进去，因此 P 波不会被
+     * 底栏、左下徽章或 HUD 压住。空列表表示无额外遮挡。
+     */
+    occlusionRects: List<ScreenRect> = emptyList(),
     /** 波前出现/结束回调：供上层收起 HUD。 */
     onWavesStarted: () -> Unit = {},
     onWavesFinished: () -> Unit = {},
@@ -530,6 +702,9 @@ fun MapScreen(
     active: Boolean = true,
 ) {
     val glass = LocalMapGlass.current
+    // 地图自身在窗口里的原点：上层给的遮挡矩形是窗口坐标，要减掉它才得到地图坐标。
+    // 地图铺满窗口时恒为 (0,0)，但实测更稳妥（详情页地图并非从窗口顶部起算）。
+    var windowOrigin by remember { mutableStateOf(Offset.Zero) }
     var centerLat by remember { mutableDoubleStateOf(35.0) }
     var centerLon by remember { mutableDoubleStateOf(105.0) }
     var zoom by remember { mutableFloatStateOf(6f) }
@@ -538,7 +713,7 @@ fun MapScreen(
     val cameraScope = rememberCoroutineScope()
     var cameraJob by remember { mutableStateOf<Job?>(null) }
     var cameraAnimating by remember { mutableStateOf(false) }
-    var lastCameraRequest by remember { mutableStateOf<Long?>(null) }
+    var lastCameraAnimationKey by remember { mutableStateOf<CameraAnimationKey?>(null) }
     var previousBasemapIsGcj02 by remember { mutableStateOf(basemap.isGcj02) }
 
     // 镜头是否锁定在焦点事件上（浮动按钮的"跟随"选中态）。默认不跟随：无定位时地图是全国概览。
@@ -548,6 +723,10 @@ fun MapScreen(
     var initializedLocation by remember { mutableStateOf(false) }
     // 波前是否出现过：用于识别"波前消失"的时刻，自动归位并收起 HUD。
     var wavesShown by remember { mutableStateOf(false) }
+    var wavesEventIdentity by remember { mutableStateOf<String?>(null) }
+    val latestFocusIdentity = rememberUpdatedState(focusEvent?.identity)
+    val latestOnWavesStarted = rememberUpdatedState(onWavesStarted)
+    val latestOnWavesFinished = rememberUpdatedState(onWavesFinished)
     // 手势事件不进入 Compose Snapshot；每帧写 Snapshot 会额外唤醒所有观察者。
     val interactionEvents = remember {
         MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
@@ -585,6 +764,7 @@ fun MapScreen(
         focusEvent?.timestamp,
         focusEvent?.magnitude,
         focusEvent?.depth,
+        focusEvent?.isCanceled,
         waveEligible,
         active,
     ) {
@@ -616,33 +796,21 @@ fun MapScreen(
         }
     }
     // 波前半径显示值：向目标半径平滑追平（对齐桌面端 Behavior），避免目标值的台阶让圆一圈一圈地跳。
-    // 目标归零（隐藏）时立即归零，不做收缩动画。同样只在绘制期读取。
+    // 目标归零（隐藏）时立即归零，不做收缩动画。
+    //
+    // 这两个值同时是**绘制**和**取景**的唯一半径来源：取景与绘制若各用一份（一个原始、一个平滑），
+    // 镜头就会永远比看到的圆宽一圈。因此推进它们的帧循环与相机跟随必须写在同一个循环里，
+    // 见 BoxWithConstraints 内的「波前平滑 + 相机跟随」段。
     var dispPKm by remember { mutableDoubleStateOf(0.0) }
     var dispSKm by remember { mutableDoubleStateOf(0.0) }
-    LaunchedEffect(active) {
-        if (!active) return@LaunchedEffect
-        var last = withFrameNanos { it }
-        while (true) {
-            val now = withFrameNanos { it }
-            val dt = ((now - last) / 1_000_000.0).coerceAtLeast(0.0)
-            last = now
-            val tp = waveP.value
-            val ts = waveS.value
-            if (tp <= 0.0 && ts <= 0.0 && dispPKm <= 0.0 && dispSKm <= 0.0) { delay(100); continue }
-            if (gestureActive) {
-                // Camera movement already invalidates the map draw. Avoid doing
-                // a second full frame-rate state update for wave smoothing while
-                // the user is actively pinching.
-                delay(100)
-                continue
-            }
-            val k = (dt / WAVE_SMOOTH_MS).coerceIn(0.0, 1.0)
-            dispPKm = if (tp <= 0.0) 0.0 else dispPKm + (tp - dispPKm) * k
-            dispSKm = if (ts <= 0.0) 0.0 else dispSKm + (ts - dispSKm) * k
-        }
-    }
 
-    BoxWithConstraints(modifier = modifier.clip(RoundedCornerShape(0.dp))) {
+    BoxWithConstraints(
+        modifier = modifier.clip(RoundedCornerShape(0.dp))
+            .onGloballyPositioned { c ->
+                val p = c.positionInWindow()
+                if (p.x != windowOrigin.x || p.y != windowOrigin.y) windowOrigin = Offset(p.x, p.y)
+            },
+    ) {
         val mapHeight = maxHeight
         val density = LocalDensity.current
         val widthPx = with(density) { maxWidth.toPx() }
@@ -653,19 +821,41 @@ fun MapScreen(
         val bottomInsetPx = with(density) { 64.dp.toPx() }
         val sideInsetPx = with(density) { 72.dp.toPx() }
 
+        // 悬浮控件实测出来的遮挡矩形（px，地图坐标系，左上原点）。空列表表示无额外遮挡。
+        // 右侧工具条是通高竖条，直接按固定宽度建模；顶栏 HUD 与底栏交给上层实测
+        // （底栏并非通栏：widthIn(max=480.dp) 居中，两侧是空的，实测后不必过度避让）。
+        val ox = windowOrigin.x
+        val oy = windowOrigin.y
+        val measured = occlusionRects
+            .map { ScreenRect(it.l - ox, it.t - oy, it.r - ox, it.b - oy) }
+            .map { ScreenRect(it.l.coerceIn(0f, widthPx), it.t.coerceIn(0f, heightPx), it.r.coerceIn(0f, widthPx), it.b.coerceIn(0f, heightPx)) }
+            .filter { it.w > 0f && it.h > 0f }
+        val occluders = buildList {
+            // 没有实测值时退回通栏顶栏（HUD 大多数时候确实通栏），有实测值则用精确矩形。
+            if (measured.isEmpty() && topInsetPx > 0f) add(ScreenRect(0f, 0f, widthPx, topInsetPx))
+            add(ScreenRect((widthPx - sideInsetPx).coerceAtLeast(0f), 0f, widthPx, heightPx))
+            if (measured.none { it.b >= heightPx - 1f }) {
+                add(ScreenRect(0f, (heightPx - bottomInsetPx).coerceAtLeast(0f), widthPx, heightPx))
+            }
+            addAll(measured)
+        }
+
+        /** 波前取景的可用区：自由区内面积最大的空白矩形，四周再留出描边余量。 */
+        fun freeRect(): ScreenRect =
+            largestFreeRect(widthPx, heightPx, occluders).shrink(with(density) { WAVE_FIT_MARGIN_DP.toPx() })
+
         /** 中国版图概览镜头（大陆 + 海南 + 台湾）。整数层级，静止时瓦片 1:1 渲染。 */
         fun chinaCamera(): Camera {
             val lonMin = 73.5; val lonMax = 135.1; val latMin = 18.0; val latMax = 53.6
             val x0 = normX(lonMin); val x1 = normX(lonMax)
             val y0 = normY(latMax); val y1 = normY(latMin)
-            val availableW = (widthPx - 2 * sideInsetPx).coerceAtLeast(80f)
-            val availableH = (heightPx - topInsetPx - bottomInsetPx).coerceAtLeast(80f)
-            val scale = minOf(availableW / (x1 - x0), availableH / (y1 - y0))
+            val rect = freeRect()
+            val scale = minOf(rect.w / (x1 - x0), rect.h / (y1 - y0))
             val z = floor(ln(scale / TILE_SIZE) / LN2).toFloat().coerceIn(MIN_ZOOM, minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
             val world = TILE_SIZE * 2.0.pow(z.toDouble())
-            val targetY = topInsetPx + availableH / 2.0
-            val lon = wrapLon((x0 + x1) / 2.0 * 360.0 - 180.0)
-            val lat = unprojLat(((y0 + y1) / 2.0 - (targetY - heightPx / 2.0) / world).coerceIn(0.0, 1.0) * worldSize(0), 0)
+            val (cx, cy) = focusCameraCenter((x0 + x1) / 2.0, (y0 + y1) / 2.0, world, rect, widthPx, heightPx)
+            val lon = wrapLon(cx * 360.0 - 180.0)
+            val lat = unprojLat(cy.coerceIn(0.0, 1.0) * worldSize(0), 0)
             return Camera(lat, lon, z)
         }
 
@@ -676,19 +866,44 @@ fun MapScreen(
                 Camera(p.first, p.second, USER_LOCATION_ZOOM)
             } else chinaCamera()
 
-        /** 震中取景镜头：固定使用与用户定位相同的默认缩放，保留顶部遮挡修正。 */
-        fun focusCamera(): Camera? {
+        /**
+         * 震中取景镜头：把半径 [radiusKm] 的波前圆完整放进可用区，震中落在可用区正中。
+         *
+         * [radiusKm] 传 null 时才从发震时刻现算——那是波前协程还没跑起来时的兜底
+         * （入场 420ms 补间、切换底图、空闲归位、"回到震中"按钮都会命中）。
+         * 正常跟随时由帧循环传入平滑后的 dispP/dispS，保证镜头与所画圆严格同源。
+         */
+        fun focusCamera(radiusKm: Double? = null): Camera? {
             val event = focusEvent ?: return null
             val (lat, lon) = if (basemap.isGcj02) CoordinateTransform.wgs84ToGcj02(event.latitude, event.longitude)
             else event.latitude to event.longitude
             val ex = normX(lon)
             val ey = normY(lat)
-            val availableH = (heightPx - topInsetPx - bottomInsetPx).coerceAtLeast(80f)
-            val z = USER_LOCATION_ZOOM.coerceIn(MIN_ZOOM, minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
+            val radius = radiusKm ?: if (waveEligible && !event.isCanceled && event.timestamp > 0L) {
+                val elapsedMs = AppClock.now() - event.timestamp
+                if (elapsedMs in 0L..WAVE_WINDOW_MS) {
+                    val (p, s) = waveRadii(event.depth, elapsedMs / 1000.0)
+                    fun visibleRadius(r: Double): Double =
+                        if (r > 0.0 && IntensityCalculator.waveOpacity(r, waveFadeKm) > 0.0) r else -1.0
+                    focusRadiusKm(visibleRadius(p), visibleRadius(s))
+                } else {
+                    focusRadiusKm(-1.0, -1.0)
+                }
+            } else {
+                focusRadiusKm(-1.0, -1.0)
+            }
+            val rect = freeRect()
+            val z = focusZoomForRect(
+                radiusKm = radius,
+                latitude = lat,
+                rect = rect,
+                maxZoom = basemap.maxZoom,
+            )
             val world = TILE_SIZE * 2.0.pow(z.toDouble())
-            val targetY = topInsetPx + availableH / 2.0
-            val lonC = wrapLon(ex * 360.0 - 180.0)
-            val latC = unprojLat((ey - (targetY - heightPx / 2.0) / world).coerceIn(0.0, 1.0) * worldSize(0), 0)
+            // 镜头中心必须对齐扣除遮挡后的可用区中心，而不是整屏中心。
+            val (centerX, centerY) = focusCameraCenter(ex, ey, world, rect, widthPx, heightPx)
+            val lonC = wrapLon(centerX * 360.0 - 180.0)
+            val latC = unprojLat(centerY.coerceIn(0.0, 1.0) * worldSize(0), 0)
             return Camera(latC, lonC, z)
         }
 
@@ -737,20 +952,36 @@ fun MapScreen(
             topOcclusionPx = topInsetPx,
         )) {
             if (widthPx <= 0f || heightPx <= 0f) return@LaunchedEffect
+            val animationKey = cameraAnimationKey(
+                event = focusEvent,
+                request = cameraRequest,
+                hasFocus = hasFocus,
+            )
+            val previousAnimationKey = lastCameraAnimationKey
+            val animationBoundary = previousAnimationKey == null || previousAnimationKey != animationKey
+
             if (hasFocus) {
                 // 尺寸变化只在自动跟随时重取景；用户已经拖动/缩放后不能被 HUD
-                // 测量变化抢回镜头。新的 request 则代表显式聚焦，允许恢复跟随。
-                val initialFocus = lastCameraRequest == null && !userMovedCamera
-                val explicitRefocus = lastCameraRequest != null && lastCameraRequest != cameraRequest
-                if (following || initialFocus || explicitRefocus) {
+                // 测量变化抢回镜头。新事件 identity 或新的 request 都是新的动画边界，
+                // 即使用户之前拖动过地图，也要像桌面端一样自动聚焦新事件。
+                if (following || animationBoundary) {
                     following = true
-                    lastCameraRequest = cameraRequest
-                    focusCamera()?.let { applyCamera(it, CAMERA_TWEEN_MS, animate = true) }
+                    lastCameraAnimationKey = animationKey
+                    val animate = animationBoundary
+                    // 同一事件的坐标/HUD/尺寸更新只修正目标位置；如果首轮补间还在进行，
+                    // 不要取消它并瞬移，等补间结束后由波前跟随循环收敛到新目标。
+                    if (!animate && cameraAnimating) return@LaunchedEffect
+                    focusCamera()?.let { applyCamera(it, CAMERA_TWEEN_MS, animate = animate) }
                 }
             } else if (!userMovedCamera) {
-                lastCameraRequest = null
+                lastCameraAnimationKey = animationKey
                 following = false
-                applyCamera(defaultCamera(), CAMERA_TWEEN_MS, animate = true)
+                val animate = previousAnimationKey == null || previousAnimationKey.hasFocus
+                applyCamera(defaultCamera(), CAMERA_TWEEN_MS, animate = animate)
+            } else {
+                // 记录当前焦点边界，避免用户手动操作后，同一事件的普通数据更新被误判为
+                // 一次新的聚焦；之后真正的新事件仍会因 identity 变化重新聚焦。
+                lastCameraAnimationKey = animationKey
             }
         }
         // 切换底图时保持当前地理位置；高德/Petal 使用 GCJ-02，OSM 使用 WGS-84。
@@ -769,11 +1000,50 @@ fun MapScreen(
             previousBasemapIsGcj02 = basemap.isGcj02
             if (following && hasFocus) focusCamera()?.let { applyCamera(it, 0L, animate = false) }
         }
-        // 波前逐帧变化时跟随（直接赋值，保证跟手）；入场补间进行中不抢镜头。
-        // 用 snapshotFlow 在协程里读波前半径，避免把高频状态变成每帧重组的入口。
-        LaunchedEffect(Unit) {
-            snapshotFlow { waveP.value to waveS.value }.collect {
-                if (following && hasFocus && !cameraAnimating) focusCamera()?.let { applyCamera(it, 0L, animate = false) }
+        // 帧循环读的是「波前平滑半径 → 取景镜头」这个映射。必须经 rememberUpdatedState：
+        // LaunchedEffect 只捕获首次组合的闭包，focusCamera 捕获的 focusEvent / 尺寸 /
+        // occluders 会永远停在首帧——换事件后旧事件的时刻已超窗，zoom 会被钉死在
+        // 300km 兜底取景上，表现为「平时不动、偶尔猛跳一下」。
+        val focusCameraFor by rememberUpdatedState<(Double) -> Camera?> { radiusKm ->
+            focusCamera(radiusKm)
+        }
+        val holdCameraFor by rememberUpdatedState<(Double, Double) -> Boolean> { pKm, sKm ->
+            shouldHoldCamera(pKm, sKm, waveFadeKm)
+        }
+        // 波前平滑 + 相机跟现在同一个循环里：取景用的半径就是绘制用的那个平滑值，
+        // 两者不会差一个 WAVE_SMOOTH_MS 的滞后，zoom 因此连续。
+        LaunchedEffect(active) {
+            if (!active) return@LaunchedEffect
+            var last = withFrameNanos { it }
+            while (true) {
+                val now = withFrameNanos { it }
+                val dt = ((now - last) / 1_000_000.0).coerceAtLeast(0.0)
+                last = now
+                val tp = waveP.value
+                val ts = waveS.value
+                if (tp <= 0.0 && ts <= 0.0 && dispPKm <= 0.0 && dispSKm <= 0.0) { delay(100); continue }
+                if (gestureActive) {
+                    // Camera movement already invalidates the map draw. Avoid doing
+                    // a second full frame-rate state update for wave smoothing while
+                    // the user is actively pinching.
+                    delay(100)
+                    continue
+                }
+                // 目标从 0 出现（首个波前 / 切换事件）时直接落到目标，而不是从 0 指数爬升，
+                // 否则取景会先按 100/300 km 兜底入镜、再收缩回来，肉眼可见地跳一次。
+                if (tp > 0.0 && dispPKm <= 0.0) dispPKm = tp else if (tp <= 0.0) dispPKm = 0.0
+                if (ts > 0.0 && dispSKm <= 0.0) dispSKm = ts else if (ts <= 0.0) dispSKm = 0.0
+                if (dispPKm > 0.0 || dispSKm > 0.0) {
+                    val k = (dt / WAVE_SMOOTH_MS).coerceIn(0.0, 1.0)
+                    if (tp > 0.0 && dispPKm != tp) dispPKm += (tp - dispPKm) * k
+                    if (ts > 0.0 && dispSKm != ts) dispSKm += (ts - dispSKm) * k
+                }
+                // 入场 420ms 补间进行中不抢镜头：applyCamera 会无条件 cancel 掉 cameraJob。
+                if (!following || !hasFocus || cameraAnimating) continue
+                // 波前已大到看不见（超过 CSIS 可感半径）就冻住，不再继续缩小。
+                if (holdCameraFor(dispPKm, dispSKm)) continue
+                focusCameraFor(focusRadiusKm(dispPKm, dispSKm))
+                    ?.let { applyCamera(it, 0L, animate = false) }
             }
         }
         // 波前全部消失（走完/淡出/事件结束）：若仍在跟随震中，自动回到我的位置（无定位则全国概览），
@@ -784,14 +1054,24 @@ fun MapScreen(
                 .collect { hasWaves ->
                     if (hasWaves) {
                         wavesShown = true
-                        onWavesStarted()
+                        wavesEventIdentity = latestFocusIdentity.value
+                        latestOnWavesStarted.value()
                     } else if (wavesShown) {
+                        val finishedIdentity = wavesEventIdentity
+                        val isCurrentEvent = shouldFinishWavesForFocus(
+                            wavesEventIdentity = finishedIdentity,
+                            currentFocusIdentity = latestFocusIdentity.value,
+                            wavesShown = wavesShown,
+                        )
                         wavesShown = false
-                        if (following) {
+                        wavesEventIdentity = null
+                        // 切换到新事件时，旧事件的波前协程会先把 waveP/waveS 清零。
+                        // 这个 false 不是“新事件波前结束”，不能把刚完成的自动聚焦又拉回默认视野。
+                        if (isCurrentEvent && following) {
                             following = false
                             applyCamera(defaultCamera(), CAMERA_TWEEN_MS, animate = true)
                         }
-                        onWavesFinished()
+                        if (isCurrentEvent) latestOnWavesFinished.value()
                     }
                 }
         }
@@ -1087,7 +1367,9 @@ fun MapScreen(
                 val fy = screenY(fLatD)
 
                 // px per km。墨卡托保角，水平/垂直同尺度：worldPx/360° ÷ (111.32·cosφ) km/°。
-                val cosLat = cos(event.latitude * PI / 180.0).coerceAtLeast(0.01)
+                // GCJ-02 底图上的事件已经平移；波前的屏上尺度必须使用同一投影纬度，
+                // 否则圆环半径与自动缩放目标会有一小段持续偏差。
+                val cosLat = cos(fLatD * PI / 180.0).coerceAtLeast(0.01)
                 val pxPerKm = (TILE_SIZE * 2.0.pow(gz.toDouble()) * gScale / 360.0) / (111.32 * cosLat)
 
                 // 波前不透明度在绘制期求值：dispPKm/dispSKm 由帧循环更新，若在组合期读会每帧重组整块地图。

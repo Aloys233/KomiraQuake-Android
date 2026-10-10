@@ -76,6 +76,8 @@ fun EventDetailScreen(
                     // 详情页只定位震中，不画 P/S 波前（历史事件本就没有活动波前）。
                     waveEligible = false, warningActive = false,
                     cameraRequest = 0L, topOcclusion = 0.dp,
+                    // 详情页地图上方是详情卡片、下方没有悬浮底栏，无额外遮挡。
+                    occlusionRects = emptyList(),
                     // 关闭空闲自动归位：用户拖动查看后不应被强行拉回默认视野。
                     idleResetMs = 30L * 60_000L,
                     modifier = Modifier.fillMaxSize(),

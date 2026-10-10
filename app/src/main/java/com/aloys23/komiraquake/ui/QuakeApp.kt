@@ -13,6 +13,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -27,6 +29,7 @@ import com.aloys23.komiraquake.ui.list.EventListScreen
 import com.aloys23.komiraquake.ui.map.MapScreen
 import com.aloys23.komiraquake.ui.map.TileLoader
 import com.aloys23.komiraquake.ui.map.Basemaps
+import com.aloys23.komiraquake.ui.map.ScreenRect
 import com.aloys23.komiraquake.ui.map.basemapById
 import com.aloys23.komiraquake.ui.settings.SettingsScreen
 import com.aloys23.komiraquake.ui.theme.LocalAppDark
@@ -56,7 +59,7 @@ fun QuakeApp(container: AppContainer) {
     val cameraRequest by container.repository.mapCameraRequest.collectAsStateWithLifecycle()
     val countdown by container.countdown.collectAsStateWithLifecycle()
     val location by container.location.state.collectAsStateWithLifecycle()
-    val sourceInfo by container.repository.sourceInfo.collectAsStateWithLifecycle()
+    val activeSourceInfos by container.repository.activeSourceInfos.collectAsStateWithLifecycle()
     val sourceInfos by container.repository.sourceInfos.collectAsStateWithLifecycle()
     val clockInfo by container.clockInfo.collectAsStateWithLifecycle()
     val selectedEvent = mapFocus ?: activeWarning ?: history.firstOrNull()
@@ -71,6 +74,11 @@ fun QuakeApp(container: AppContainer) {
     val detailEvent = detailId?.let { id -> eventList.firstOrNull { it.identity == id } }
     val density = LocalDensity.current
     var topOcclusion by remember { mutableStateOf(280.dp) }
+    // 悬浮控件的实测包围盒（px，地图坐标系）。波前取景按这些矩形挑最大空白区，
+    // 保证 P 波既不出屏也不被压住。
+    var hudBox by remember { mutableStateOf(IntRect.Zero) }
+    var barBox by remember { mutableStateOf(IntRect.Zero) }
+    var sourceBox by remember { mutableStateOf(IntRect.Zero) }
     // 全屏沉浸：内容铺满整屏，只有浮层/HUD 自己让开系统栏。
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
@@ -129,6 +137,10 @@ fun QuakeApp(container: AppContainer) {
                                     hasFocus = mapHasFocus,
                                     warningActive = activeWarning != null,
                                     topOcclusion = topOcclusion, modifier = Modifier.fillMaxSize(),
+                                    // 窗口坐标系；MapScreen 自己换算到地图坐标系。
+                                    occlusionRects = listOf(hudBox, barBox, sourceBox)
+                                        .filter { it.width > 0 && it.height > 0 }
+                                        .map { ScreenRect(it.left.toFloat(), it.top.toFloat(), it.right.toFloat(), it.bottom.toFloat()) },
                                     onWavesStarted = { wavesDoneId = null },
                                     onWavesFinished = { wavesDoneId = selectedEvent?.identity },
                                     active = section == 0,
@@ -137,6 +149,11 @@ fun QuakeApp(container: AppContainer) {
                                 Column(Modifier.align(Alignment.TopStart).statusBarsPadding().padding(12.dp).widthIn(max = 420.dp).fillMaxWidth()
                                     .heightIn(max = maxHeight * 0.52f)
                                     .onSizeChanged { topOcclusion = with(density) { it.height.toDp() } + 24.dp }
+                                    .onGloballyPositioned { c ->
+                                        val s = c.size
+                                        val p = c.positionInWindow()
+                                        hudBox = IntRect(p.x.toInt(), p.y.toInt(), p.x.toInt() + s.width, p.y.toInt() + s.height)
+                                    }
                                     .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     // 首页顶部只保留地震 HUD；标题/状态栏、预警引导与无事件占位均已移除。
                                     val hud = selectedEvent?.takeIf { it.identity != wavesDoneId }
@@ -163,10 +180,15 @@ fun QuakeApp(container: AppContainer) {
                                 Column(Modifier.align(Alignment.BottomStart)
                                     .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 104.dp + navBottom)
                                     .fillMaxWidth(0.68f).widthIn(max = 360.dp)
-                                    .heightIn(max = maxHeight * 0.3f).verticalScroll(rememberScrollState()),
+                                    .heightIn(max = maxHeight * 0.3f).verticalScroll(rememberScrollState())
+                                    .onGloballyPositioned { c ->
+                                        val s = c.size
+                                        val p = c.positionInWindow()
+                                        sourceBox = IntRect(p.x.toInt(), p.y.toInt(), p.x.toInt() + s.width, p.y.toInt() + s.height)
+                                    },
                                     verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     // 左下角数据源状态（对齐桌面端）：时钟徽章之上。
-                                    SourceStatusLabel(sourceInfo, dark)
+                                    SourceStatusLabel(activeSourceInfos, dark)
                                     NtpClockLabel(clockInfo, dark)
                                 }
                             }
@@ -203,7 +225,13 @@ fun QuakeApp(container: AppContainer) {
                     .pointerInput(Unit) { detectTapGestures { } }
                     .padding(start = 40.dp, end = 40.dp, bottom = 14.dp)
                     // 平板/大屏上不再无限拉长：悬浮胶囊限制在手机级宽度并居中。
-                    .widthIn(max = 480.dp),
+                    .widthIn(max = 480.dp)
+                    // 放在 navigationBarsPadding 之后，量到的才是含系统导航栏的真实高度。
+                    .onGloballyPositioned { c ->
+                        val s = c.size
+                        val p = c.positionInWindow()
+                        barBox = IntRect(p.x.toInt(), p.y.toInt(), p.x.toInt() + s.width, p.y.toInt() + s.height)
+                    },
             )
             // 详情页盖住底栏，但让位于全屏预警。
             detailEvent?.let { event ->

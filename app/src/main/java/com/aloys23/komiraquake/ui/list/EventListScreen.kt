@@ -106,7 +106,7 @@ fun EventListScreen(events: List<EarthquakeEvent>, dark: Boolean, hasLocation: B
             } else {
                 items(filtered, key = { it.identity }, contentType = { "event" }) { event ->
                     EarthquakeTile(event, dark, { onSelect(event) },
-                        modifier = Modifier.height(144.dp), fillHeight = true, standard = standard)
+                        modifier = Modifier.height(144.dp), standard = standard)
                 }
             }
         }

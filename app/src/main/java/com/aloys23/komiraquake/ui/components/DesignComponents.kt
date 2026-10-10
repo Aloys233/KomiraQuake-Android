@@ -4,6 +4,7 @@ import androidx.annotation.DrawableRes
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
@@ -45,12 +46,14 @@ fun LucideIcon(icon: AppIcon, tint: Color, description: String? = null, modifier
 @Composable
 fun Label(text: String, color: Color, size: TextUnit = 14.sp, bold: Boolean = false,
     maxLines: Int = Int.MAX_VALUE, modifier: Modifier = Modifier) {
+    // 列表里每个条目会有多个 Label，且随滚动反复进入组合；TextStyle 在这里缓存，避免重复分配。
+    val style = remember(size, bold) { AppTypography.style(size.value.coerceAtLeast(12f), bold) }
     Text(
         text = text,
         modifier = modifier,
         color = color,
         maxLines = maxLines,
         overflow = TextOverflow.Ellipsis,
-        style = AppTypography.style(size.value.coerceAtLeast(12f), bold),
+        style = style,
     )
 }

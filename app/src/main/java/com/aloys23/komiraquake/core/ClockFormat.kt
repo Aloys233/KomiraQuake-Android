@@ -19,11 +19,19 @@ object ClockFormat {
     const val ZONE_LABEL = "UTC+8"
 
     /**
+     * SimpleDateFormat 非线程安全，且构造昂贵（每次都要解析 pattern、载入 locale 数据）。
+     * 列表每个条目、地图时钟每 200ms 都要渲染发震时刻，原来每次调用都新建实例，是滚动时
+     * 主要的 GC 来源之一。这里按线程复用一个实例。
+     */
+    private val stampFormat: ThreadLocal<SimpleDateFormat> = object : ThreadLocal<SimpleDateFormat>() {
+        override fun initialValue(): SimpleDateFormat =
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                .apply { timeZone = TimeZone.getTimeZone(ZONE_ID) }
+    }
+
+    /**
      * 把 epoch ms 渲染为 UTC+8 的 `yyyy-MM-dd HH:mm:ss`。
      * 使用显式时区，不依赖设备默认时区。
      */
-    fun utc8Stamp(epochMs: Long): String =
-        SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
-            .apply { timeZone = TimeZone.getTimeZone(ZONE_ID) }
-            .format(Date(epochMs))
+    fun utc8Stamp(epochMs: Long): String = stampFormat.get()!!.format(Date(epochMs))
 }

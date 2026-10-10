@@ -17,7 +17,6 @@ import com.aloys23.komiraquake.data.source.pancakes.PancakesSource
 import com.aloys23.komiraquake.data.source.simulated.SimulatedSource
 import com.aloys23.komiraquake.data.source.wolfx.WolfxSource
 import com.aloys23.komiraquake.data.source.whews.WhewsSource
-import com.aloys23.komiraquake.model.ConnectionStatus
 import com.aloys23.komiraquake.model.DataSourceInfo
 import com.aloys23.komiraquake.model.EarthquakeEvent
 import com.aloys23.komiraquake.service.AlertPolicy
@@ -111,10 +110,19 @@ class QuakeRepository(
     val sourceInfos: StateFlow<List<DataSourceInfo>> =
         combine(sources.map { it.status }) { arr -> arr.toList() }
             .stateIn(scope, SharingStarted.Eagerly, sources.map { it.status.value })
-    /** 状态栏用的聚合状态：任一启用源在线即视为在线。 */
-    val sourceInfo: StateFlow<DataSourceInfo> =
-        combine(sourceInfos, settings.state) { infos, s -> aggregateSources(infos.filter { s.enabled(it.id) }) }
-            .stateIn(scope, SharingStarted.Eagerly, aggregateSources(sources.map { it.status.value }))
+    /**
+     * 左下角徽章用：逐源展示「已启用且已配置」的数据源各自的状态（顺序同 [sources]）。
+     * 门控与 [applySourceToggles] 的启动条件一致：未配置的源根本不会 start，也就不该展示。
+     */
+    val activeSourceInfos: StateFlow<List<DataSourceInfo>> =
+        combine(sourceInfos, settings.state) { infos, s ->
+            infos.filterIndexed { i, _ -> s.enabled(sources[i].id) && sources[i].isConfigured() }
+        }.stateIn(
+            scope, SharingStarted.Eagerly,
+            sourceInfos.value.filterIndexed { i, _ ->
+                settings.current.enabled(sources[i].id) && sources[i].isConfigured()
+            },
+        )
     private val _warningOverlayVisible = MutableStateFlow(false)
     val warningOverlayVisible = _warningOverlayVisible.asStateFlow()
 
@@ -324,33 +332,5 @@ class QuakeRepository(
         private const val ACTIVE_TICK_MS = 1000L
         /** 空闲时的最长等待；新事件会经 publish() 更新 _activeWarnings 立即唤醒。 */
         private const val IDLE_TICK_MS = 5000L
-
-        /** 聚合状态优先级：在线 > 连接中 > 异常 > 断开；用于单条状态栏展示。 */
-        private fun aggregateSources(list: List<DataSourceInfo>): DataSourceInfo {
-            if (list.isEmpty()) return DataSourceInfo(id = "none", name = "无启用数据源", region = "全球")
-            val status = list.maxByOrNull { statusRank(it.status) }!!.status
-            val directory = list.maxByOrNull { statusRank(it.directoryStatus) }!!.directoryStatus
-            val connected = list.filter { it.status == ConnectionStatus.CONNECTED }
-            return DataSourceInfo(
-                id = list.joinToString("+") { it.id },
-                name = list.joinToString(" · ") { it.name },
-                region = "全球",
-                status = status,
-                latencyMs = connected.mapNotNull { it.latencyMs }.minOrNull(),
-                lastHeartbeat = list.mapNotNull { it.lastHeartbeat }.maxOrNull(),
-                description = list.joinToString("；") { it.description },
-                directoryStatus = directory,
-                directoryLatencyMs = list.mapNotNull { it.directoryLatencyMs }.minOrNull(),
-                directoryLastSuccessAt = list.mapNotNull { it.directoryLastSuccessAt }.maxOrNull(),
-                directoryError = list.firstNotNullOfOrNull { it.directoryError },
-            )
-        }
-
-        private fun statusRank(s: ConnectionStatus): Int = when (s) {
-            ConnectionStatus.CONNECTED -> 3
-            ConnectionStatus.CONNECTING -> 2
-            ConnectionStatus.ERROR -> 1
-            ConnectionStatus.DISCONNECTED -> 0
-        }
     }
 }
