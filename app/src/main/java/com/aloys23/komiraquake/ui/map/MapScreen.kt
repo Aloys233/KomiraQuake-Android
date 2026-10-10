@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -38,18 +39,16 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aloys23.komiraquake.core.AppClock
@@ -117,6 +116,8 @@ private const val TILE_FALLBACK_MIN_SUBPX = 24f
 private const val UNDERLAY_MAX_MS = 1500L
 private const val MIN_ZOOM = 1f
 private const val MAX_ZOOM = 18f
+/** 用户定位默认镜头：比全国概览（zoom 6）近一级，便于确认当前位置。 */
+internal const val USER_LOCATION_ZOOM = 7f
 
 /** 捏合缩放阻尼：1.0 = 手指张开一倍即放大一级；小于 1 可降低灵敏度。 */
 private const val ZOOM_SENSITIVITY = 0.8f
@@ -131,6 +132,48 @@ private const val WAVE_SMOOTH_MS = 120.0
 
 /** 目标镜头（中心经纬度 + 缩放）。 */
 private data class Camera(val lat: Double, val lon: Double, val zoom: Float)
+
+/**
+ * 自动取景的输入快照。
+ *
+ * 事件 identity 在实时报次之间保持不变，但震中坐标/发震时刻可能被修正；同时 Compose
+ * 首帧的视口和 HUD 遮挡值可能还未稳定。它们都必须让取景副作用重新计算目标 zoom，不能
+ * 只依赖 cameraRequest（cameraRequest 只在显式聚焦时递增）。
+ */
+internal data class FocusCameraKey(
+    val identity: String?,
+    val timestamp: Long?,
+    val latitude: Double?,
+    val longitude: Double?,
+    val magnitude: Double?,
+    val depth: Double?,
+    val request: Long,
+    val hasFocus: Boolean,
+    val widthPx: Float,
+    val heightPx: Float,
+    val topOcclusionPx: Float,
+)
+
+internal fun focusCameraKey(
+    event: EarthquakeEvent?,
+    request: Long,
+    hasFocus: Boolean,
+    widthPx: Float,
+    heightPx: Float,
+    topOcclusionPx: Float,
+) = FocusCameraKey(
+    identity = event?.identity,
+    timestamp = event?.timestamp,
+    latitude = event?.latitude,
+    longitude = event?.longitude,
+    magnitude = event?.magnitude,
+    depth = event?.depth,
+    request = request,
+    hasFocus = hasFocus,
+    widthPx = widthPx,
+    heightPx = heightPx,
+    topOcclusionPx = topOcclusionPx,
+)
 
 /** OutCubic 缓动：与桌面端 Easing.OutCubic 一致。 */
 private fun easeOutCubic(t: Double): Double { val u = 1.0 - t; return 1.0 - u * u * u }
@@ -201,6 +244,11 @@ private fun unprojLat(y: Double, z: Int): Double {
 // 归一化世界坐标（[0,1]），与缩放级别无关：projX(lon,z) == normX(lon)·worldSize(z)。
 private fun wrapLon(lon: Double) = ((lon + 180.0) % 360.0 + 360.0) % 360.0 - 180.0
 private fun wrappedDelta(delta: Double) = delta - floor(delta + 0.5)
+/** 把瓦片列折叠到 [0, 2^z)，用于 URL 与缓存探测。 */
+private fun wrapTileX(x: Int, z: Int): Int {
+    val n = 1 shl z
+    return ((x % n) + n) % n
+}
 private fun normX(lon: Double) = (lon + 180.0) / 360.0
 private fun normY(lat: Double): Double {
     val rad = lat.coerceIn(-85.05112878, 85.05112878) * PI / 180.0
@@ -212,6 +260,7 @@ private fun normY(lat: Double): Double {
  * 因此拖动/捏合时这个列表保持相等、不会每帧重建（对齐桌面端 MapView.qml 的 tileModel）。
  */
 private data class TileRef(
+    /** 未折叠的原始瓦片列（可为负/超过 n），用于屏幕定位；URL 才折叠到 [0, n)。 */
     val x: Int,
     val y: Int,
     val z: Int,
@@ -270,6 +319,16 @@ internal fun tileOriginY(centerLat: Double, zoom: Float, z: Int, heightPx: Float
 }
 
 /**
+ * 瓦片左上角的屏幕 x（px）。[tileX] 必须是**未折叠**的原始列：跨 ±180° 时相机原点与瓦片
+ * 列会同步平移整 n 格，用原始列才能让瓦片保持在原位（否则反经线处整片空白并跳变）。
+ */
+internal fun tileScreenX(tileX: Int, centerLon: Double, zoom: Float, z: Int, widthPx: Float): Float {
+    val tileScale = 2f.pow(zoom - z)
+    val originX = projX(centerLon, z) * tileScale - widthPx / 2.0
+    return (tileX * (TILE_SIZE * tileScale) - originX).toFloat()
+}
+
+/**
  * tileUrl 会做多次 String.replace，而兜底探测在绘制热路径上每帧要调用数百次
  * （每个缺口瓦片最多 ~90 次 peek），是逐帧 GC 压力的主要来源。URL 是恒定值，
  * 缓存起来消除这些中间字符串分配。仅 UI 线程访问，容量有界。
@@ -294,6 +353,31 @@ private fun tileUrl(basemap: Basemap, x: Int, y: Int, z: Int): String {
     return url
 }
 
+private val tilePaint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+
+/**
+ * 以亚像素位置绘制一块瓦片。位置与尺寸保持浮点，避免在连续缩放动画里逐帧取整造成
+ * 相邻瓦片之间的相对位移（整屏"波纹/抖动"）。用单条原生 drawBitmap(src, RectF, paint)
+ * 完成，而不是 save/translate/scale/restore 包裹：同样亚像素，但只有一条绘制指令，
+ * 省下 RenderThread 逐帧回放时的指令录制开销。缩放目标尺寸固定为 sizePx×sizePx，兼容 256/512px 瓦片源。
+ */
+private fun DrawScope.drawTileBitmap(
+    bmp: ImageBitmap,
+    left: Float,
+    top: Float,
+    sizePx: Float,
+    alpha: Float = 1f,
+) {
+    if (bmp.width <= 0 || bmp.height <= 0 || sizePx <= 0f) return
+    tilePaint.alpha = (alpha.coerceIn(0f, 1f) * 255f).roundToInt()
+    drawContext.canvas.nativeCanvas.drawBitmap(
+        bmp.asAndroidBitmap(),
+        null,
+        android.graphics.RectF(left, top, left + sizePx, top + sizePx),
+        tilePaint,
+    )
+}
+
 /**
  * 目标瓦片未就绪时，用已缓存的最近父瓦片放大顶替，避免出现空白块。
  * 只读 [TileLoader] 缓存，不触发网络。返回是否真的画了（用于判断淡入时是否有底可垫）。
@@ -305,10 +389,11 @@ private fun DrawScope.drawParentTile(
     sizePx: Float,
     basemap: Basemap,
     loader: TileLoader,
-    dst: IntSize,
 ): Boolean {
     var level = tile.z
-    var tx = tile.x
+    // 折叠回 [0, n)：原始列可为负/超界，逐层钻取的坐标与 srcOffset 需要非负的有效索引。
+    val wx = wrapTileX(tile.x, tile.z)
+    var tx = wx
     var ty = tile.y
     var factor = 1
     // 逐层向粗层钻取，命中即停；最多 TILE_FALLBACK_PARENT_LEVELS 层。
@@ -322,12 +407,14 @@ private fun DrawScope.drawParentTile(
         val parent = loader.peek(tileUrl(basemap, tx, ty, level)) ?: continue
         val sub = parent.width / factor
         if (sub <= 0) return false
-        drawImage(
-            image = parent,
-            srcOffset = IntOffset((tile.x % factor) * sub, (tile.y % factor) * sub),
-            srcSize = IntSize(sub, sub),
-            dstOffset = IntOffset(px.roundToInt(), py.roundToInt()),
-            dstSize = dst,
+        val sx = (wx % factor) * sub
+        val sy = (tile.y % factor) * sub
+        tilePaint.alpha = 255
+        drawContext.canvas.nativeCanvas.drawBitmap(
+            parent.asAndroidBitmap(),
+            android.graphics.Rect(sx, sy, sx + sub, sy + sub),
+            android.graphics.RectF(px, py, px + sizePx, py + sizePx),
+            tilePaint,
         )
         return true
     }
@@ -351,6 +438,7 @@ private fun DrawScope.drawChildTiles(
     var grid = 1
     var level = tile.z
     var drew = false
+    val wx = wrapTileX(tile.x, tile.z)
     repeat(TILE_FALLBACK_CHILD_LEVELS) {
         grid = grid shl 1
         level++
@@ -359,12 +447,8 @@ private fun DrawScope.drawChildTiles(
         var covered = 0
         for (dy in 0 until grid) {
             for (dx in 0 until grid) {
-                val child = loader.peek(tileUrl(basemap, tile.x * grid + dx, tile.y * grid + dy, level)) ?: continue
-                drawImage(
-                    image = child,
-                    dstOffset = IntOffset((px + dx * sub).roundToInt(), (py + dy * sub).roundToInt()),
-                    dstSize = IntSize(sub.roundToInt(), sub.roundToInt()),
-                )
+                val child = loader.peek(tileUrl(basemap, wx * grid + dx, tile.y * grid + dy, level)) ?: continue
+                drawTileBitmap(child, px + dx * sub, py + dy * sub, sub)
                 covered++
             }
         }
@@ -385,9 +469,8 @@ private fun DrawScope.drawFallbackTile(
     sizePx: Float,
     basemap: Basemap,
     loader: TileLoader,
-    dst: IntSize,
 ): Boolean {
-    val coarser = drawParentTile(tile, px, py, sizePx, basemap, loader, dst)
+    val coarser = drawParentTile(tile, px, py, sizePx, basemap, loader)
     val finer = drawChildTiles(tile, px, py, sizePx, basemap, loader)
     return coarser || finer
 }
@@ -433,6 +516,8 @@ fun MapScreen(
     hasFocus: Boolean = true,
     modifier: Modifier = Modifier,
     cameraRequest: Long = 0L,
+    /** 与桌面端右侧 layers 按钮一致；详情地图不提供时隐藏该按钮。 */
+    onCycleBasemap: (() -> Unit)? = null,
     topOcclusion: androidx.compose.ui.unit.Dp = 310.dp,
     /** 波前出现/结束回调：供上层收起 HUD。 */
     onWavesStarted: () -> Unit = {},
@@ -453,6 +538,8 @@ fun MapScreen(
     val cameraScope = rememberCoroutineScope()
     var cameraJob by remember { mutableStateOf<Job?>(null) }
     var cameraAnimating by remember { mutableStateOf(false) }
+    var lastCameraRequest by remember { mutableStateOf<Long?>(null) }
+    var previousBasemapIsGcj02 by remember { mutableStateOf(basemap.isGcj02) }
 
     // 镜头是否锁定在焦点事件上（浮动按钮的"跟随"选中态）。默认不跟随：无定位时地图是全国概览。
     var following by remember { mutableStateOf(false) }
@@ -474,8 +561,7 @@ fun MapScreen(
                 val position = if (basemap.isGcj02) CoordinateTransform.wgs84ToGcj02(userLat, userLon) else userLat to userLon
                 centerLat = position.first
                 centerLon = position.second
-                // 固定缩放：无定位时地图已按全国范围取景，那个级别不适合作为"聚焦我的位置"的默认值。
-                zoom = 6f
+                zoom = USER_LOCATION_ZOOM
                 following = false
             }
         }
@@ -494,7 +580,14 @@ fun MapScreen(
     // 否则跟随预警时每帧都会重组整块地图，镜头切换（自动跟随）动画就会被拖顿。
     val waveP = remember { mutableDoubleStateOf(-1.0) }
     val waveS = remember { mutableDoubleStateOf(-1.0) }
-    LaunchedEffect(focusEvent?.identity, focusEvent?.timestamp, waveEligible, active) {
+    LaunchedEffect(
+        focusEvent?.identity,
+        focusEvent?.timestamp,
+        focusEvent?.magnitude,
+        focusEvent?.depth,
+        waveEligible,
+        active,
+    ) {
         val event = focusEvent
         if (!active || event == null || !waveEligible || event.timestamp <= 0) {
             waveP.value = -1.0; waveS.value = -1.0
@@ -555,13 +648,6 @@ fun MapScreen(
         val widthPx = with(density) { maxWidth.toPx() }
         val heightPx = with(density) { maxHeight.toPx() }
         val scheme = MiuixTheme.colorScheme
-        val labelPaint = remember(dark, density, scheme.onSurface, scheme.background) {
-            android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-                color = scheme.onSurface.toArgb()
-                textSize = with(density) { 12.sp.toPx() }
-                setShadowLayer(3f, 0f, 0f, scheme.background.toArgb())
-            }
-        }
 
         val topInsetPx = with(density) { topOcclusion.toPx() }.coerceAtMost(heightPx * 0.75f)
         val bottomInsetPx = with(density) { 64.dp.toPx() }
@@ -583,35 +669,26 @@ fun MapScreen(
             return Camera(lat, lon, z)
         }
 
-        /** 默认视野：有定位则聚焦用户（固定 zoom 6），否则全国概览。 */
+        /** 默认视野：有定位则聚焦用户，否则全国概览。 */
         fun defaultCamera(): Camera =
             if (userLat != null && userLon != null) {
                 val p = if (basemap.isGcj02) CoordinateTransform.wgs84ToGcj02(userLat, userLon) else userLat to userLon
-                Camera(p.first, p.second, 6f)
+                Camera(p.first, p.second, USER_LOCATION_ZOOM)
             } else chinaCamera()
 
-        /** 震中取景镜头：只框震中区域，半径随 P/S 波前（100km 下限 / 无波 300km），无级缩放。 */
+        /** 震中取景镜头：固定使用与用户定位相同的默认缩放，保留顶部遮挡修正。 */
         fun focusCamera(): Camera? {
             val event = focusEvent ?: return null
             val (lat, lon) = if (basemap.isGcj02) CoordinateTransform.wgs84ToGcj02(event.latitude, event.longitude)
             else event.latitude to event.longitude
             val ex = normX(lon)
             val ey = normY(lat)
-            val radiusKm = focusRadiusKm(waveP.value, waveS.value)
-            val radius = radiusKm / (40075.0 * cos(lat * PI / 180.0).coerceAtLeast(0.05))
-            val left = ex - radius
-            val right = ex + radius
-            val top = ey - radius
-            val bottom = ey + radius
-            val availableW = (widthPx - 2 * sideInsetPx).coerceAtLeast(80f)
             val availableH = (heightPx - topInsetPx - bottomInsetPx).coerceAtLeast(80f)
-            val scale = minOf(availableW / (right - left), availableH / (bottom - top))
-            // 无级缩放：不取整，随波前连续变化（瓦片渲染器本就支持非整数 zoom）。
-            val z = (ln(scale / TILE_SIZE) / LN2).toFloat().coerceIn(MIN_ZOOM, minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
+            val z = USER_LOCATION_ZOOM.coerceIn(MIN_ZOOM, minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
             val world = TILE_SIZE * 2.0.pow(z.toDouble())
             val targetY = topInsetPx + availableH / 2.0
-            val lonC = wrapLon((left + right) / 2.0 * 360.0 - 180.0)
-            val latC = unprojLat(((top + bottom) / 2.0 - (targetY - heightPx / 2.0) / world).coerceIn(0.0, 1.0) * worldSize(0), 0)
+            val lonC = wrapLon(ex * 360.0 - 180.0)
+            val latC = unprojLat((ey - (targetY - heightPx / 2.0) / world).coerceIn(0.0, 1.0) * worldSize(0), 0)
             return Camera(latC, lonC, z)
         }
 
@@ -649,14 +726,48 @@ fun MapScreen(
         /** 手势接管镜头：停掉补间，避免与拖动/捏合互相打架。 */
         fun stopCameraAnimation() { cameraJob?.cancel(); cameraJob = null; cameraAnimating = false }
         // 有显式焦点则平滑取景震中；否则平滑回到默认视野（我的位置 / 全国概览）。
-        LaunchedEffect(focusEvent?.identity, cameraRequest, hasFocus) {
+        // 视口/遮挡变化也必须重算：Android 首帧布局未稳定时若用 0 尺寸算出的目标镜头，
+        // 原实现会在动画期间跳过后续尺寸更新，导致聚焦事件不自动缩放。
+        LaunchedEffect(focusCameraKey(
+            event = focusEvent,
+            request = cameraRequest,
+            hasFocus = hasFocus,
+            widthPx = widthPx,
+            heightPx = heightPx,
+            topOcclusionPx = topInsetPx,
+        )) {
+            if (widthPx <= 0f || heightPx <= 0f) return@LaunchedEffect
             if (hasFocus) {
-                following = true
-                focusCamera()?.let { applyCamera(it, CAMERA_TWEEN_MS, animate = true) }
+                // 尺寸变化只在自动跟随时重取景；用户已经拖动/缩放后不能被 HUD
+                // 测量变化抢回镜头。新的 request 则代表显式聚焦，允许恢复跟随。
+                val initialFocus = lastCameraRequest == null && !userMovedCamera
+                val explicitRefocus = lastCameraRequest != null && lastCameraRequest != cameraRequest
+                if (following || initialFocus || explicitRefocus) {
+                    following = true
+                    lastCameraRequest = cameraRequest
+                    focusCamera()?.let { applyCamera(it, CAMERA_TWEEN_MS, animate = true) }
+                }
             } else if (!userMovedCamera) {
+                lastCameraRequest = null
                 following = false
                 applyCamera(defaultCamera(), CAMERA_TWEEN_MS, animate = true)
             }
+        }
+        // 切换底图时保持当前地理位置；高德/Petal 使用 GCJ-02，OSM 使用 WGS-84。
+        // 跟随事件时再按新 datum 重取景，保持震中和缩放都与桌面端一致。
+        LaunchedEffect(basemap.id) {
+            val oldIsGcj02 = previousBasemapIsGcj02
+            if (oldIsGcj02 != basemap.isGcj02) {
+                val position = if (basemap.isGcj02) {
+                    CoordinateTransform.wgs84ToGcj02(centerLat, centerLon)
+                } else {
+                    CoordinateTransform.gcj02ToWgs84(centerLat, centerLon)
+                }
+                centerLat = position.first
+                centerLon = position.second
+            }
+            previousBasemapIsGcj02 = basemap.isGcj02
+            if (following && hasFocus) focusCamera()?.let { applyCamera(it, 0L, animate = false) }
         }
         // 波前逐帧变化时跟随（直接赋值，保证跟手）；入场补间进行中不抢镜头。
         // 用 snapshotFlow 在协程里读波前半径，避免把高频状态变成每帧重组的入口。
@@ -664,10 +775,6 @@ fun MapScreen(
             snapshotFlow { waveP.value to waveS.value }.collect {
                 if (following && hasFocus && !cameraAnimating) focusCamera()?.let { applyCamera(it, 0L, animate = false) }
             }
-        }
-        LaunchedEffect(widthPx, heightPx, topOcclusion) {
-            if (following && hasFocus) focusCamera()?.let { applyCamera(it, 0L, animate = false) }
-            else if (!hasFocus && !userMovedCamera) applyCamera(defaultCamera(), 0L, animate = false)
         }
         // 波前全部消失（走完/淡出/事件结束）：若仍在跟随震中，自动回到我的位置（无定位则全国概览），
         // 并通知上层收起 HUD。用户已手动操作过镜头（following=false）时不抢镜头。
@@ -735,6 +842,8 @@ fun MapScreen(
             )
             val list = ArrayList<TileRef>()
             for (tx in grid.minX..grid.maxX) {
+                // 位置用未折叠的原始 tx（对齐桌面端 tileModel）：跨 ±180° 时相机原点与瓦片
+                // 索引会同步平移整整 n 格，几何因此保持连续；只有取 URL 时才折叠回 [0, n)。
                 val wrappedX = ((tx % grid.n) + grid.n) % grid.n
                 for (ty in grid.minY..grid.maxY) {
                     if (ty < 0 || ty >= grid.n) continue
@@ -742,7 +851,7 @@ fun MapScreen(
                         tx in visibleGrid.minX..visibleGrid.maxX &&
                         ty in visibleGrid.minY..visibleGrid.maxY
                     ) 0 else 1
-                    list.add(TileRef(wrappedX, ty, grid.z, tileUrl(basemap, wrappedX, ty, grid.z), priority))
+                    list.add(TileRef(tx, ty, grid.z, tileUrl(basemap, wrappedX, ty, grid.z), priority))
                 }
             }
             list.sortBy { it.priority }
@@ -919,10 +1028,8 @@ fun MapScreen(
                 val gz = grid.z
                 val gScale = 2f.pow(zoom - gz)
                 val scaledTile = TILE_SIZE * gScale
-                val originX = projX(centerLon, gz) * gScale - size.width / 2.0
                 val originY = projY(centerLat, gz) * gScale - size.height / 2.0
                 val tileSizePx = scaledTile + 1f
-                val dst = IntSize(tileSizePx.roundToInt(), tileSizePx.roundToInt())
 
                 // 底衬：换层过渡期把旧层整层铺在最下面。整层直绘（每格一次查表），
                 // 比逐格向上/向下钻取缓存便宜两个数量级，也不会露黑。
@@ -933,7 +1040,7 @@ fun MapScreen(
                     val uTile = TILE_SIZE * uScale
                     val uOriginX = projX(centerLon, uz) * uScale - size.width / 2.0
                     val uOriginY = projY(centerLat, uz) * uScale - size.height / 2.0
-                    val uDst = IntSize((uTile + 1f).roundToInt(), (uTile + 1f).roundToInt())
+                    val uSize = uTile + 1f
                     for (t in under) {
                         val bmp = images[t.url] ?: continue
                         val drawX = t.x * uTile - uOriginX
@@ -941,21 +1048,14 @@ fun MapScreen(
                         if (drawX + uTile < 0.0 || drawX > size.width ||
                             drawY + uTile < 0.0 || drawY > size.height
                         ) continue
-                        drawImage(
-                            image = bmp,
-                            dstOffset = IntOffset(
-                                drawX.roundToInt(),
-                                drawY.roundToInt(),
-                            ),
-                            dstSize = uDst,
-                        )
+                        drawTileBitmap(bmp, drawX.toFloat(), drawY.toFloat(), uSize)
                     }
                 }
 
                 // Keep the prefetch ring available when a pan enters it, but
                 // skip every tile that is outside the current clip rectangle.
                 for (tile in tiles) {
-                    val px = (tile.x * scaledTile - originX).toFloat()
+                    val px = tileScreenX(tile.x, centerLon, zoom, gz, size.width)
                     val py = (tile.y * scaledTile - originY).toFloat()
                     if (px + tileSizePx < 0f || px > size.width ||
                         py + tileSizePx < 0f || py > size.height
@@ -963,7 +1063,7 @@ fun MapScreen(
                     val bmp = images[tile.url]
                     if (bmp == null) {
                         // 有底衬垫着就不做逐格兜底探测：换层瞬间缺口瓦片极多，探测会退化成风暴。
-                        if (under == null) drawFallbackTile(tile, px, py, tileSizePx, basemap, tileLoader, dst)
+                        if (under == null) drawFallbackTile(tile, px, py, tileSizePx, basemap, tileLoader)
                         continue
                     }
                     // 新瓦片淡入，掩盖跨层级清晰度突变造成的顿挫。
@@ -974,19 +1074,10 @@ fun MapScreen(
                     } else {
                         1f
                     }
-                    if (alpha < 1f && (under != null || drawFallbackTile(tile, px, py, tileSizePx, basemap, tileLoader, dst))) {
-                        drawImage(
-                            image = bmp,
-                            dstOffset = IntOffset(px.roundToInt(), py.roundToInt()),
-                            dstSize = dst,
-                            alpha = alpha,
-                        )
+                    if (alpha < 1f && (under != null || drawFallbackTile(tile, px, py, tileSizePx, basemap, tileLoader))) {
+                        drawTileBitmap(bmp, px, py, tileSizePx, alpha)
                     } else {
-                        drawImage(
-                            image = bmp,
-                            dstOffset = IntOffset(px.roundToInt(), py.roundToInt()),
-                            dstSize = dst,
-                        )
+                        drawTileBitmap(bmp, px, py, tileSizePx)
                     }
                 }
 
@@ -1011,9 +1102,8 @@ fun MapScreen(
                         color = SeismicColors.P_WAVE.copy(alpha = pOpacity.toFloat()),
                         radius = (dispPKm * pxPerKm).toFloat(),
                         center = Offset(fx, fy),
-                        style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f))),
+                        style = Stroke(width = 2f),
                     )
-                    drawContext.canvas.nativeCanvas.drawText("P 纵波", fx + 8f, fy - (dispPKm * pxPerKm).toFloat() - 6f, labelPaint)
                 }
                 // S 波径向渐变填充：中心透明、边缘着色，衬在描边之下（对齐 kanameishi 的 sWaveFill）。
                 if (dispSKm > 0.0 && sFillOpacity > 0.0) {
@@ -1036,7 +1126,6 @@ fun MapScreen(
                         center = Offset(fx, fy),
                         style = Stroke(width = 2f),
                     )
-                    drawContext.canvas.nativeCanvas.drawText("S 横波", fx + 8f, fy + (dispSKm * pxPerKm).toFloat() + 18f, labelPaint)
                 }
 
                 // 震中 X 十字：10px 米黄描边打底 + 6px 红描边，圆头。
@@ -1089,11 +1178,6 @@ fun MapScreen(
             val barClearance = navBottom + 90.dp
 
             // Foreground controls remain sharp and are never sampled.
-            // 缩放按钮的可用态只在跨过上下限时翻转，用派生状态避免捏合时逐帧重组整列按钮。
-            val canZoomIn by remember(basemap.maxZoom) {
-                derivedStateOf { zoom < minOf(MAX_ZOOM, basemap.maxZoom.toFloat()) }
-            }
-            val canZoomOut by remember { derivedStateOf { zoom > MIN_ZOOM } }
             Column(
                 modifier = Modifier
                     .align(androidx.compose.ui.Alignment.BottomEnd)
@@ -1103,36 +1187,41 @@ fun MapScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 // 放大（整数层级 ±1，和桌面端滚轮一致）
-                MapFloatingButton(AppIcon.Plus, dark, "放大地图", canZoomIn) {
+                MapFloatingButton(AppIcon.Plus, dark, "放大地图") {
                     following = false
                     userMovedCamera = true
                     interactionEvents.tryEmit(Unit)
                     val target = (zoom.roundToInt() + 1).toFloat()
                         .coerceAtMost(minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
-                    applyCamera(Camera(centerLat, centerLon, target), ZOOM_TWEEN_MS, animate = true)
+                    if (target > zoom.roundToInt()) {
+                        applyCamera(Camera(centerLat, centerLon, target), ZOOM_TWEEN_MS, animate = true)
+                    }
                 }
                 // 缩小
-                MapFloatingButton(AppIcon.Minus, dark, "缩小地图", canZoomOut) {
+                MapFloatingButton(AppIcon.Minus, dark, "缩小地图") {
                     following = false
                     userMovedCamera = true
                     interactionEvents.tryEmit(Unit)
                     val target = (zoom.roundToInt() - 1).toFloat().coerceAtLeast(MIN_ZOOM)
-                    applyCamera(Camera(centerLat, centerLon, target), ZOOM_TWEEN_MS, animate = true)
+                    if (target < zoom.roundToInt()) {
+                        applyCamera(Camera(centerLat, centerLon, target), ZOOM_TWEEN_MS, animate = true)
+                    }
                 }
+                MapFloatingDivider()
                 // 回到我的位置
                 if (userLat != null && userLon != null) {
-                    MapFloatingButton(AppIcon.Locate, dark, "定位到我的位置") {
+                    MapFloatingButton(AppIcon.Navigation, dark, "回到我的位置") {
                         following = false
                         userMovedCamera = true
                         interactionEvents.tryEmit(Unit)
                         val position = shift(userLat, userLon)
-                        applyCamera(Camera(position.first, position.second, 6f), CAMERA_TWEEN_MS, animate = true)
+                        applyCamera(Camera(position.first, position.second, USER_LOCATION_ZOOM), CAMERA_TWEEN_MS, animate = true)
                     }
                 }
                 // 回到震中 / 退出跟随
                 if (focus != null) {
-                    MapFloatingButton(AppIcon.Navigation, dark,
-                        if (following) "正在跟随事件；点击退出跟随" else "恢复事件视野，聚焦震中区域",
+                    MapFloatingButton(AppIcon.Locate, dark,
+                        if (following) "正在跟随震中；点击退出跟随" else "恢复跟随震中",
                         selected = following) {
                         if (following) {
                             following = false
@@ -1142,6 +1231,10 @@ fun MapScreen(
                             focusCamera()?.let { applyCamera(it, CAMERA_TWEEN_MS, animate = true) }
                         }
                     }
+                }
+                val cycleBasemap = onCycleBasemap
+                if (cycleBasemap != null) {
+                    MapFloatingButton(AppIcon.Layers, dark, "切换底图", onClick = cycleBasemap)
                 }
             }
 
@@ -1157,6 +1250,17 @@ fun MapScreen(
             )
         }
     }
+}
+
+@Composable
+private fun ColumnScope.MapFloatingDivider() {
+    Box(
+        Modifier
+            .align(androidx.compose.ui.Alignment.CenterHorizontally)
+            .width(28.dp)
+            .height(1.dp)
+            .background(MiuixTheme.colorScheme.outline.copy(alpha = 0.7f)),
+    )
 }
 
 /** 右下角比例尺：按 70dp 目标宽度挑选最接近的整数刻度。 */

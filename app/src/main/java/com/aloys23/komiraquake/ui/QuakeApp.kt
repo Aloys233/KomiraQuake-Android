@@ -26,6 +26,7 @@ import com.aloys23.komiraquake.ui.list.EventDetailScreen
 import com.aloys23.komiraquake.ui.list.EventListScreen
 import com.aloys23.komiraquake.ui.map.MapScreen
 import com.aloys23.komiraquake.ui.map.TileLoader
+import com.aloys23.komiraquake.ui.map.Basemaps
 import com.aloys23.komiraquake.ui.map.basemapById
 import com.aloys23.komiraquake.ui.settings.SettingsScreen
 import com.aloys23.komiraquake.ui.theme.LocalAppDark
@@ -118,6 +119,11 @@ fun QuakeApp(container: AppContainer) {
                                     userLat = location.latitude, userLon = location.longitude, dark = dark,
                                     basemap = basemapById(settings.basemapId), tileLoader = tileLoader,
                                     focusEvent = selectedEvent, cameraRequest = cameraRequest,
+                                    onCycleBasemap = {
+                                        val index = Basemaps.indexOfFirst { it.id == settings.basemapId }
+                                        val next = Basemaps[(index + 1) % Basemaps.size]
+                                        container.settings.update { it.copy(basemapId = next.id) }
+                                    },
                                     // 只有活跃预警或用户显式焦点才取景震中并画波前圆；history 回退的最近事件只画 X。
                                     waveEligible = mapHasFocus,
                                     hasFocus = mapHasFocus,
@@ -195,7 +201,9 @@ fun QuakeApp(container: AppContainer) {
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
                     .pointerInput(Unit) { detectTapGestures { } }
-                    .padding(start = 40.dp, end = 40.dp, bottom = 14.dp),
+                    .padding(start = 40.dp, end = 40.dp, bottom = 14.dp)
+                    // 平板/大屏上不再无限拉长：悬浮胶囊限制在手机级宽度并居中。
+                    .widthIn(max = 480.dp),
             )
             // 详情页盖住底栏，但让位于全屏预警。
             detailEvent?.let { event ->

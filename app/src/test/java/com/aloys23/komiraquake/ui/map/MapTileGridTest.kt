@@ -4,6 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
+import kotlin.math.floor
 
 /**
  * 瓦片网格只在跨过瓦片边界或整数缩放层级时变化。这是拖动/捏合不再每帧重建瓦片列表、
@@ -71,5 +73,32 @@ class MapTileGridTest {
         val g = grid(zoom = 6f)
         assertEquals((ox / 256.0).toInt(), g.minX + 2)
         assertEquals((oy / 256.0).toInt(), g.minY + 2)
+    }
+
+    @Test
+    fun antimeridianPanKeepsTilesContinuous() {
+        // 相机越过 ±180° 时，原始瓦片列与原点会同步平移整 n 格，同一地理位置在屏上不动。
+        val z = 3
+        val n = 1 shl z
+        val zoom = z.toFloat()
+        val w = 1080f
+        val geoLon = 179.9
+        val geoRaw = floor((geoLon + 180.0) / 360.0 * n).toInt()
+
+        fun rawColumnFor(centerLon: Double): Int {
+            val g = tileGrid(0.0, centerLon, zoom, w, 2000f, maxZoom = 18, margin = 2)
+            return (g.minX..g.maxX).first { ((it % n) + n) % n == geoRaw }
+        }
+
+        // 180.1° 越过反经线后表述为 -179.9°；用原始列定位，屏上位置几乎不变。
+        val rawWest = rawColumnFor(179.9)
+        val rawEast = rawColumnFor(-179.9)
+        assertEquals(tileScreenX(rawWest, 179.9, zoom, z, w), tileScreenX(rawEast, -179.9, zoom, z, w), 2f)
+
+        // 对照：若拿折叠后的列定位（旧实现），位置会整整跳一个世界宽度。
+        val wrapped = { raw: Int -> ((raw % n) + n) % n }
+        val jump = abs(tileScreenX(wrapped(rawWest), 179.9, zoom, z, w) -
+            tileScreenX(wrapped(rawEast), -179.9, zoom, z, w))
+        assertTrue(jump > w)
     }
 }

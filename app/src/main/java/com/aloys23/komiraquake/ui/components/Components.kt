@@ -217,7 +217,7 @@ fun QuakeHudCard(event: EarthquakeEvent, dark: Boolean, modifier: Modifier = Mod
 /** kanameishi 式列表项：左侧烈度色块，右侧「震中 / 发震时刻 / 震级·深度·距离」。点击整卡进入详情页。 */
 @Composable
 fun EarthquakeTile(event: EarthquakeEvent, dark: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier,
-    standard: IntensityStandard = IntensityStandard.CSIS) {
+    fillHeight: Boolean = false, standard: IntensityStandard = IntensityStandard.CSIS) {
     // 列表固定展示「震源最大烈度」；本地预估烈度只出现在 HUD / 全屏预警。
     val intensity = listIntensityDisplayOf(event, standard)
     val onSurface = MiuixTheme.colorScheme.onSurface
@@ -225,6 +225,7 @@ fun EarthquakeTile(event: EarthquakeEvent, dark: Boolean, onClick: () -> Unit, m
     val radius = 16.dp
     Box(modifier.fillMaxWidth()) {
         Card(Modifier.fillMaxWidth()
+            .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier)
             .clickable(role = Role.Button, onClickLabel = "查看${event.location}详情", onClick = onClick),
             cornerRadius = radius,
             // 比默认 surfaceContainer 更突出的底色，让每项读起来是独立卡片（对齐桌面端）。

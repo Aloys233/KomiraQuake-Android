@@ -2,8 +2,10 @@ package com.aloys23.komiraquake.ui.list
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,10 +54,14 @@ fun EventListScreen(events: List<EarthquakeEvent>, dark: Boolean, hasLocation: B
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     Box(modifier.fillMaxSize().background(MiuixTheme.colorScheme.background), contentAlignment = Alignment.TopCenter) {
         // Header scrolls with the list, so it cannot consume the viewport at large font scales.
-        LazyColumn(Modifier.widthIn(max = 760.dp).fillMaxSize(),
+        // 列数按可用宽度自适应：当前平板宽度会得到三列，更窄时自动降为两列/一列。
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(minSize = 360.dp),
+            modifier = Modifier.widthIn(max = 1200.dp).fillMaxSize(),
             contentPadding = PaddingValues(start = 16.dp, top = 8.dp + statusTop, end = 16.dp, bottom = 96.dp + navBottom),
-            verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item(key = "heading") {
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            item(key = "heading", span = { GridItemSpan(maxLineSpan) }) {
                 Row(Modifier.fillMaxWidth().padding(vertical = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     LucideIcon(AppIcon.List, MiuixTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
@@ -66,13 +72,13 @@ fun EventListScreen(events: List<EarthquakeEvent>, dark: Boolean, hasLocation: B
                     }
                 }
             }
-            item(key = "search") {
+            item(key = "search", span = { GridItemSpan(maxLineSpan) }) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     TextField(searchQuery, { searchQuery = it }, label = "搜索地名 / 区域", modifier = Modifier.weight(1f))
                     IconButton(onClick = onRefresh) { LucideIcon(AppIcon.Refresh, MiuixTheme.colorScheme.primary, "刷新地震目录") }
                 }
             }
-            item(key = "filters") {
+            item(key = "filters", span = { GridItemSpan(maxLineSpan) }) {
                 TabRowWithContour(
                     tabs = FilterType.entries.map { it.label },
                     selectedTabIndex = filter.ordinal,
@@ -82,9 +88,9 @@ fun EventListScreen(events: List<EarthquakeEvent>, dark: Boolean, hasLocation: B
                     },
                 )
             }
-            item(key = "count") { Label("${filtered.size} 条事件 · 暂无事件不代表安全", MiuixTheme.colorScheme.onSurfaceSecondary, 12.sp) }
+            item(key = "count", span = { GridItemSpan(maxLineSpan) }) { Label("${filtered.size} 条事件 · 暂无事件不代表安全", MiuixTheme.colorScheme.onSurfaceSecondary, 12.sp) }
             if (filtered.isEmpty()) {
-                item(key = "empty") {
+                item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
                     Card(Modifier.fillMaxWidth(), insideMargin = PaddingValues(16.dp)) {
                         LucideIcon(AppIcon.Search, MiuixTheme.colorScheme.onSurfaceSecondary, modifier = Modifier.padding(bottom = 12.dp).size(28.dp))
                         Label("暂无符合条件的地震事件", MiuixTheme.colorScheme.onSurface, 17.sp, bold = true)
@@ -98,8 +104,9 @@ fun EventListScreen(events: List<EarthquakeEvent>, dark: Boolean, hasLocation: B
                     }
                 }
             } else {
-                items(filtered, key = { it.identity }) { event ->
-                    EarthquakeTile(event, dark, { onSelect(event) }, standard = standard)
+                items(filtered, key = { it.identity }, contentType = { "event" }) { event ->
+                    EarthquakeTile(event, dark, { onSelect(event) },
+                        modifier = Modifier.height(144.dp), fillHeight = true, standard = standard)
                 }
             }
         }

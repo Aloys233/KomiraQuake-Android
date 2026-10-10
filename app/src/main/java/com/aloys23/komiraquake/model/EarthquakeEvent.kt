@@ -1,11 +1,13 @@
 package com.aloys23.komiraquake.model
 
+import androidx.compose.runtime.Immutable
 import com.aloys23.komiraquake.core.AppClock
 
 /**
  * 地震事件。字段与 《NATIVE_PORT_SPEC》 §1.1 一一对应。
  * 时间统一使用 epoch 毫秒（LocalDateTime 在跨端契约中不便于比较，故两端统一为 Instant）。
  */
+@Immutable
 data class EarthquakeEvent(
     val id: String,
     /** 数据源原始事件 ID（跨报次/跨链路稳定，用于同一地震的合并）。 */
