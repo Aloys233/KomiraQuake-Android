@@ -73,5 +73,25 @@ internal fun AppearanceSection(
                 onTabSelected = { index -> onUpdate { it.copy(basemapId = Basemaps[index].id) } },
             )
         }
+
+        Spacer(Modifier.height(14.dp))
+        SmallTitle("矢量图层")
+        Card(insideMargin = PaddingValues(12.dp)) {
+            // 选纯矢量底图时本就画矢量，无需再叠一层。
+            if (settings.basemapId != "vector") {
+                SwitchPreference(
+                    title = "叠加矢量层",
+                    summary = "在栅格底图之上叠加省界与区县",
+                    checked = settings.vectorOverlay,
+                    onCheckedChange = { checked -> onUpdate { it.copy(vectorOverlay = checked) } },
+                )
+            }
+            SwitchPreference(
+                title = "区县烈度着色",
+                summary = "预警时按烈度给区县面填色（区内取震中烈度，偏保守）",
+                checked = settings.districtShading,
+                onCheckedChange = { checked -> onUpdate { it.copy(districtShading = checked) } },
+            )
+        }
     }
 }

@@ -127,6 +127,8 @@ fun QuakeApp(container: AppContainer) {
                                     userLat = location.latitude, userLon = location.longitude, dark = dark,
                                     basemap = basemapById(settings.basemapId), tileLoader = tileLoader,
                                     focusEvent = selectedEvent, cameraRequest = cameraRequest,
+                                    vectorOverlay = settings.vectorOverlay,
+                                    districtShading = settings.districtShading,
                                     onCycleBasemap = {
                                         val index = Basemaps.indexOfFirst { it.id == settings.basemapId }
                                         val next = Basemaps[(index + 1) % Basemaps.size]

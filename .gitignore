@@ -16,6 +16,9 @@ keystore/
 *.iml
 .kotlin/
 
+# 工具元数据
+.commandcode/
+
 # 构建产物
 captures/
 .cxx/

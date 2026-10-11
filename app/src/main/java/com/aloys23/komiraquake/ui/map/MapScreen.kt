@@ -37,6 +37,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asAndroidBitmap
@@ -86,6 +87,8 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.PI
 import kotlin.math.atan
 import kotlin.math.cos
@@ -96,7 +99,7 @@ import kotlin.math.pow
 import kotlin.math.roundToInt
 import kotlin.math.tan
 
-private const val TILE_SIZE = 256
+internal const val TILE_SIZE = 256
 private const val WAVE_TABLE_SWITCH_KM = 2000.0
 private const val WAVE_MAX_RADIUS_KM = 10000.0
 private const val WAVE_WINDOW_MS = 60L * 60L * 1000L
@@ -119,6 +122,11 @@ private const val MIN_ZOOM = 1f
 private const val MAX_ZOOM = 18f
 /** 用户定位默认镜头：比全国概览（zoom 6）近一级，便于确认当前位置。 */
 internal const val USER_LOCATION_ZOOM = 7f
+/**
+ * 省级分界线（province 层）出现的最小层级：全国概览及更远处省界会糊成一团噪声，
+ * 拉近到 z5 才画。与桌面端 `MapView.provinceBorderMinZoom` 对齐。
+ */
+internal const val PROVINCE_BORDER_MIN_ZOOM = 5f
 
 /** 捏合缩放阻尼：1.0 = 手指张开一倍即放大一级；小于 1 可降低灵敏度。 */
 private const val ZOOM_SENSITIVITY = 0.8f
@@ -223,6 +231,11 @@ data class Basemap(
     val subdomains: List<String> = emptyList(),
     val isGcj02: Boolean = false,
     val maxZoom: Int = 18,
+    /**
+     * 纯矢量底图：没有栅格瓦片，底图由 .kvb 的行政区划绘制。
+     * 标记后瓦片网格计算会跳过它（否则会为不存在的瓦片 URL 发请求）。
+     */
+    val isVector: Boolean = false,
 )
 
 val AmapVector = Basemap(
@@ -249,10 +262,23 @@ val Petal = Basemap(
     maxZoom = 18,
 )
 
-// 与桌面端 MapView 保持一致：同样的四个底图，不含各端独有的项。
-val Basemaps = listOf(AmapVector, Petal, Osm)
+/**
+ * 纯矢量底图：世界陆地 + 中国省界 + 区县，数据来自 assets/map_bounds.kvb（WGS-84）。
+ * 无栅格瓦片，故 urlTemplate 为空；叠加到其他底图之上时由 vectorOverlay 控制。
+ */
+val Vector = Basemap(
+    id = "vector",
+    name = "矢量 · WGS-84",
+    urlTemplate = "",
+    isGcj02 = false,
+    maxZoom = 13,
+    isVector = true,
+)
 
-private fun worldSize(z: Int) = TILE_SIZE.toDouble() * 2.0.pow(z)
+// 与桌面端 MapView 保持一致：同样的底图集合。
+val Basemaps = listOf(AmapVector, Petal, Osm, Vector)
+
+internal fun worldSize(z: Int) = TILE_SIZE.toDouble() * 2.0.pow(z)
 
 /**
  * Render one integer tile layer through the whole [z, z + 1) zoom interval.
@@ -262,8 +288,8 @@ private fun worldSize(z: Int) = TILE_SIZE.toDouble() * 2.0.pow(z)
 private fun tileRenderLevel(zoom: Float, maxZoom: Int): Int =
     floor(zoom.toDouble()).toInt().coerceIn(MIN_ZOOM.toInt(), minOf(MAX_ZOOM.toInt(), maxZoom))
 
-private fun projX(lon: Double, z: Int) = (lon + 180.0) / 360.0 * worldSize(z)
-private fun projY(lat: Double, z: Int): Double {
+internal fun projX(lon: Double, z: Int) = (lon + 180.0) / 360.0 * worldSize(z)
+internal fun projY(lat: Double, z: Int): Double {
     val rad = lat.coerceIn(-85.05112878, 85.05112878) * PI / 180.0
     val y = (1.0 - ln(tan(rad) + 1.0 / cos(rad)) / PI) / 2.0
     return y * worldSize(z)
@@ -700,6 +726,10 @@ fun MapScreen(
     idleResetMs: Long = 20_000L,
     /** 是否为当前可见页：常驻 Pager 中不可见时暂停动画循环，避免占用 UI 线程。 */
     active: Boolean = true,
+    /** 在栅格底图之上叠加矢量层（省界 / 区县着色）。对齐桌面端 vectorOverlay。 */
+    vectorOverlay: Boolean = false,
+    /** 区县 EEW 烈度着色开关。对齐桌面端 districtShading。 */
+    districtShading: Boolean = true,
 ) {
     val glass = LocalMapGlass.current
     // 地图自身在窗口里的原点：上层给的遮挡矩形是窗口坐标，要减掉它才得到地图坐标。
@@ -708,6 +738,33 @@ fun MapScreen(
     var centerLat by remember { mutableDoubleStateOf(35.0) }
     var centerLon by remember { mutableDoubleStateOf(105.0) }
     var zoom by remember { mutableFloatStateOf(6f) }
+
+    // 矢量底图数据（3.7 MiB，assets）。缺失或损坏时为 null，地图退回纯栅格。
+    val context = LocalContext.current
+    val vectorRenderer = remember { VectorMapRenderer.load(context) }
+    val vectorOnly = basemap.isVector
+    val vectorActive = vectorOnly || vectorOverlay
+    // 叠加到 GCJ-02 栅格底图时才对矢量顶点纠偏；纯矢量模式下不纠偏
+    //（矢量数据与震中同为 WGS-84，天然一致）。
+    val vectorGcjShift = !vectorOnly && basemap.isGcj02
+
+    // 区县名 -> CSIS 烈度。每次焦点事件变化时在后台线程算一次，绝不在绘制路径上算。
+    var districtIntensity by remember { mutableStateOf<Map<String, Double>>(emptyMap()) }
+    LaunchedEffect(focusEvent?.identity, districtShading, vectorActive, vectorRenderer) {
+        val event = focusEvent
+        if (event == null || !districtShading || !vectorActive || vectorRenderer == null ||
+            event.magnitude <= 0.0
+        ) {
+            districtIntensity = emptyMap()
+            return@LaunchedEffect
+        }
+        districtIntensity = withContext(Dispatchers.Default) {
+            VectorMapRenderer.computeDistrictIntensity(
+                vectorRenderer, event.magnitude, event.depth,
+                event.latitude, event.longitude,
+            )
+        }
+    }
     // 程序化镜头补间（对齐桌面端 moveCamera）：手势/跟随直接赋值，其余平滑过去。
     val reduceMotion = LocalReduceMotion.current
     val cameraScope = rememberCoroutineScope()
@@ -816,6 +873,9 @@ fun MapScreen(
         val widthPx = with(density) { maxWidth.toPx() }
         val heightPx = with(density) { maxHeight.toPx() }
         val scheme = MiuixTheme.colorScheme
+        // 矢量配色：跟随主题，深色下描边更亮，避免糊成一片。
+        val landFillColor = scheme.surfaceContainer
+        val provinceStrokeColor = scheme.outline
 
         val topInsetPx = with(density) { topOcclusion.toPx() }.coerceAtMost(heightPx * 0.75f)
         val bottomInsetPx = with(density) { 64.dp.toPx() }
@@ -1112,6 +1172,8 @@ fun MapScreen(
         }
 
         val tiles = remember(grid, basemap.id) {
+            // 纯矢量底图没有栅格瓦片：直接空集，不为不存在的瓦片 URL 发请求。
+            if (basemap.isVector) return@remember emptyList<TileRef>()
             // Build a zero-margin grid as the loading priority boundary. The outer
             // ring remains useful for panning, but it must not occupy all six load
             // permits before the screen itself has any tiles.
@@ -1377,6 +1439,26 @@ fun MapScreen(
                 val sOpacity = if (dispSKm > 0.0) IntensityCalculator.waveOpacity(dispSKm, waveFadeKm) else 0.0
                 // S 波径向渐变填充的不透明度：只在影响半径内可见（对齐 kanameishi 的 sWaveFill）。
                 val sFillOpacity = if (dispSKm > 0.0) IntensityCalculator.waveFillOpacity(dispSKm, waveFadeKm) else 0.0
+
+                // 矢量层：世界陆地 / 省界 / 区县（EEW 时按烈度着色）。
+                // 压在瓦片之上、波前之下 —— 预警时用户既要看底图也要看烈度分布。
+                vectorRenderer?.let { renderer ->
+                    renderer.districtIntensity = districtIntensity
+                    with(renderer) {
+                    draw(
+                        centerLat = centerLat,
+                        centerLon = centerLon,
+                        zoom = zoom,
+                        gcjShift = vectorGcjShift,
+                        vectorOnly = vectorOnly,
+                        landFill = landFillColor,
+                        coastStroke = provinceStrokeColor,
+                        // 省级分界线只在拉近（z >= 5）后画：全国概览时线条糊成噪声。
+                        provinceStroke = if (zoom >= PROVINCE_BORDER_MIN_ZOOM) provinceStrokeColor
+                                         else Color.Transparent,
+                    )
+                    }
+                }
 
                 // P/S 波前圆：反解走时表得到半径（km），-1 表示不画。半径用平滑后的显示值。
                 if (dispPKm > 0.0) {
