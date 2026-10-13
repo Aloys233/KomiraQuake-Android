@@ -56,17 +56,19 @@ class IntensityCalculatorTest {
     @Test
     fun waveOpacityFadesWithRadius() {
         val fade = 1000.0
-        assertEquals(1.0, IntensityCalculator.waveOpacity(400.0, fade), 1e-9)   // ≤0.8·fade
-        assertEquals(0.25, IntensityCalculator.waveOpacity(fade, fade), 1e-9)   // 影响半径处
+        assertEquals(1.0, IntensityCalculator.waveOpacity(950.0, fade), 1e-9)   // 前 95% 保持不透明
+        assertTrue(IntensityCalculator.waveOpacity(990.0, fade) in 0.0..1.0) // 最后 5% 快速淡出
+        assertEquals(0.0, IntensityCalculator.waveOpacity(fade, fade), 1e-9)   // CSIS I 处隐藏
         assertEquals(0.0, IntensityCalculator.waveOpacity(10000.0, fade), 1e-9) // 硬上限
         assertEquals(0.0, IntensityCalculator.waveOpacity(12000.0, fade), 1e-9)
-        assertTrue(IntensityCalculator.waveOpacity(900.0, fade) > IntensityCalculator.waveOpacity(1100.0, fade))
+        assertTrue(IntensityCalculator.waveOpacity(900.0, fade) >= IntensityCalculator.waveOpacity(990.0, fade))
     }
 
     @Test
     fun waveFillOpacityOnlyInsideInfluenceRadius() {
         val fade = 1000.0
-        assertEquals(0.25, IntensityCalculator.waveFillOpacity(200.0, fade), 1e-9)  // ≤0.8·fade
+        assertEquals(0.25, IntensityCalculator.waveFillOpacity(950.0, fade), 1e-9)  // 前 95% 保持不透明
+        assertTrue(IntensityCalculator.waveFillOpacity(990.0, fade) in 0.0..0.25) // 最后 5% 快速淡出
         assertEquals(0.0, IntensityCalculator.waveFillOpacity(fade, fade), 1e-9)    // 影响半径处归零
         assertEquals(0.0, IntensityCalculator.waveFillOpacity(1500.0, fade), 1e-9)  // 超出不填充
     }

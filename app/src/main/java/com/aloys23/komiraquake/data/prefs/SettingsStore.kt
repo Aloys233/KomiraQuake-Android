@@ -19,10 +19,8 @@ enum class ThemeMode {
 /** 设置快照。《NATIVE_PORT_SPEC》 §7。 */
 data class Settings(
     val basemapId: String = "petal",
-    /** 在栅格底图之上叠加矢量层（省界 / 区县着色）。对齐桌面端 vectorOverlay。 */
+    /** 在栅格底图之上叠加矢量层（省界 / 区县）；开启时预警按区县烈度着色。对齐桌面端 vectorOverlay。 */
     val vectorOverlay: Boolean = false,
-    /** 区县 EEW 烈度着色。对齐桌面端 districtShading。 */
-    val districtShading: Boolean = true,
     val intensityStandard: IntensityStandard = IntensityStandard.CSIS,
     /** 本地烈度过滤：仅当本地预估烈度达到该值时才提醒；0 表示不作筛选。 */
     val localIntensityFilter: Double = 0.0,
@@ -108,7 +106,6 @@ class SettingsStore internal constructor(private val prefs: SharedPreferences) {
     private fun load(): Settings = Settings(
         basemapId = prefs.getString("basemapId", "petal") ?: "petal",
         vectorOverlay = prefs.getBoolean("vectorOverlay", false),
-        districtShading = prefs.getBoolean("districtShading", true),
         intensityStandard = if (prefs.getInt("intensityStandard", 0) == 1) {
             IntensityStandard.JMA
         } else {
@@ -151,7 +148,6 @@ class SettingsStore internal constructor(private val prefs: SharedPreferences) {
         prefs.edit()
             .putString("basemapId", s.basemapId)
             .putBoolean("vectorOverlay", s.vectorOverlay)
-            .putBoolean("districtShading", s.districtShading)
             .putInt("intensityStandard", if (s.intensityStandard == IntensityStandard.JMA) 1 else 0)
             .putFloat("localIntensityFilter", s.localIntensityFilter.toFloat())
             .putBoolean("enableWarnings", s.enableWarnings)

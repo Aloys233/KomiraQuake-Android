@@ -6,6 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
 import kotlin.math.floor
+import kotlin.math.pow
 
 /**
  * 瓦片网格只在跨过瓦片边界或整数缩放层级时变化。这是拖动/捏合不再每帧重建瓦片列表、
@@ -62,6 +63,20 @@ class MapTileGridTest {
     fun zoomClampedToBasemapMax() {
         assertEquals(18, grid(zoom = 21f, maxZoom = 18).z)
         assertEquals(1, grid(zoom = -3f, maxZoom = 18).z)
+    }
+
+    @Test
+    fun minZoomCoversTheViewport() {
+        // 竖屏手机：受限的是高度；世界高度必须 >= 视口高度，否则纵向会露出一条背景带（“长方形”）。
+        val phone = minZoomForViewport(1080f, 2000f)
+        assertTrue(256.0 * 2.0.pow(phone.toDouble()) >= 2000.0 - 1e-6)
+
+        // 宽屏桌面：受限的是宽度。
+        val desktop = minZoomForViewport(1600f, 900f)
+        assertTrue(256.0 * 2.0.pow(desktop.toDouble()) >= 1600.0 - 1e-6)
+
+        // 小视口不越过绝对下限。
+        assertEquals(1f, minZoomForViewport(200f, 150f), 0f)
     }
 
     @Test

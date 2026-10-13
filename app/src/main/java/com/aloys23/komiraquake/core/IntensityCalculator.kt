@@ -51,37 +51,23 @@ object IntensityCalculator {
         return lo
     }
 
-    /** 在 [minRadius, maxRadius] 上从 maxOpacity 过渡到 minOpacity（对齐 kanameishi 的 calcOpacity）。 */
-    private fun rampedOpacity(
-        radius: Double, minRadius: Double, maxRadius: Double,
-        minOpacity: Double, maxOpacity: Double,
-    ): Double {
-        if (maxRadius <= minRadius) return if (radius <= minRadius) maxOpacity else minOpacity
-        if (radius <= minRadius * 0.2 + maxRadius * 0.8) return maxOpacity
-        if (radius >= maxRadius) return minOpacity
-        val k = 5.0 * (minOpacity - maxOpacity) / (maxRadius - minRadius)
-        val b = (5.0 * maxOpacity * maxRadius - 4.0 * minOpacity * maxRadius - minOpacity * minRadius) /
-            (maxRadius - minRadius)
-        return k * radius + b
-    }
-
-    /**
-     * 波前描边透明度（对齐 kanameishi 的 P/S 波）：半径 ≤ 影响半径 [fadeKm] 时由 1 渐隐到 0.25，
-     * 其后由 0.25 渐隐到 0，超过硬上限 [hardMaxKm] 完全隐藏。
-     */
+    /** 波前描边透明度：前 95% 保持不透明，只在 CSIS I 前最后 5% 快速淡到 0。 */
     fun waveOpacity(radiusKm: Double, fadeKm: Double, hardMaxKm: Double = 10000.0): Double {
-        if (radiusKm <= 0.0 || fadeKm <= 0.0 || radiusKm >= hardMaxKm) return 0.0
-        return if (radiusKm <= fadeKm) rampedOpacity(radiusKm, 0.0, fadeKm, 0.25, 1.0)
-        else rampedOpacity(radiusKm, fadeKm, hardMaxKm, 0.0, 0.25)
+        val fadeEndKm = minOf(fadeKm, hardMaxKm)
+        if (radiusKm <= 0.0 || fadeEndKm <= 0.0 || radiusKm >= fadeEndKm) return 0.0
+        val fadeStartKm = fadeEndKm * 0.95
+        if (radiusKm <= fadeStartKm) return 1.0
+        return ((fadeEndKm - radiusKm) / (fadeEndKm - fadeStartKm)).coerceIn(0.0, 1.0)
     }
 
     /**
-     * S 波径向渐变填充的不透明度：影响半径 [fadeKm] 内由 0.25 递减到 0（对齐 kanameishi 的
-     * sWaveFill），超过 [fadeKm] 不再填充。需与中心透明、边缘着色的径向渐变叠加使用。
+     * S 波径向渐变填充的不透明度：前 95% 保持 0.25，只在影响半径最后 5% 快速归零。
      */
     fun waveFillOpacity(radiusKm: Double, fadeKm: Double): Double {
         if (radiusKm <= 0.0 || fadeKm <= 0.0 || radiusKm > fadeKm) return 0.0
-        return rampedOpacity(radiusKm, 0.0, fadeKm, 0.0, 0.25)
+        val fadeStartKm = fadeKm * 0.95
+        if (radiusKm <= fadeStartKm) return 0.25
+        return (0.25 * (fadeKm - radiusKm) / (fadeKm - fadeStartKm)).coerceIn(0.0, 0.25)
     }
 
     /**

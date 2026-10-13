@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aloys23.komiraquake.AppContainer
+import com.aloys23.komiraquake.service.AlertPolicy
 import com.aloys23.komiraquake.service.GuardService
 import com.aloys23.komiraquake.ui.components.*
 import com.aloys23.komiraquake.ui.list.EventDetailScreen
@@ -65,7 +66,11 @@ fun QuakeApp(container: AppContainer) {
     val selectedEvent = mapFocus ?: activeWarning ?: history.firstOrNull()
     // 显式焦点：活跃预警或用户点选。只有此时才自动取景震中并画波前；history 回退的最近事件只画 X。
     val mapHasFocus = mapFocus != null || activeWarning != null
-    // 波前走完后收起左上角 HUD；新的波前或切换到其它事件时恢复。
+    // 触发了本地烈度限制且有倒计时的预警，受到最高优先级保护，绝不被收起或遮挡
+    val hasProtectedWarning = activeWarning?.let {
+        it.isActive && AlertPolicy.evaluate(it, settings).eligible && countdown >= 0
+    } == true
+    // 波前走完后收起左上角 HUD；新的波前或切换到其它事件时恢复。受保护预警绝不收起。
     var wavesDoneId by remember { mutableStateOf<String?>(null) }
     val tileLoader = remember { TileLoader(container.tileClient) }
     var section by remember { mutableIntStateOf(0) }
@@ -79,6 +84,9 @@ fun QuakeApp(container: AppContainer) {
     var hudBox by remember { mutableStateOf(IntRect.Zero) }
     var barBox by remember { mutableStateOf(IntRect.Zero) }
     var sourceBox by remember { mutableStateOf(IntRect.Zero) }
+    // 左下角数据源/时钟两张卡片的实测内容宽度（px）：判断宽屏上能否塞进底栏胶囊左侧。
+    var sourceLabelW by remember { mutableIntStateOf(0) }
+    var clockLabelW by remember { mutableIntStateOf(0) }
     // 全屏沉浸：内容铺满整屏，只有浮层/HUD 自己让开系统栏。
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
 
@@ -128,7 +136,6 @@ fun QuakeApp(container: AppContainer) {
                                     basemap = basemapById(settings.basemapId), tileLoader = tileLoader,
                                     focusEvent = selectedEvent, cameraRequest = cameraRequest,
                                     vectorOverlay = settings.vectorOverlay,
-                                    districtShading = settings.districtShading,
                                     onCycleBasemap = {
                                         val index = Basemaps.indexOfFirst { it.id == settings.basemapId }
                                         val next = Basemaps[(index + 1) % Basemaps.size]
@@ -138,13 +145,21 @@ fun QuakeApp(container: AppContainer) {
                                     waveEligible = mapHasFocus,
                                     hasFocus = mapHasFocus,
                                     warningActive = activeWarning != null,
-                                    topOcclusion = topOcclusion, modifier = Modifier.fillMaxSize(),
+                                    topOcclusion = topOcclusion,
+                                    hudWidthPx = hudBox.width.toFloat(),
+                                    modifier = Modifier.fillMaxSize(),
                                     // 窗口坐标系；MapScreen 自己换算到地图坐标系。
                                     occlusionRects = listOf(hudBox, barBox, sourceBox)
                                         .filter { it.width > 0 && it.height > 0 }
                                         .map { ScreenRect(it.left.toFloat(), it.top.toFloat(), it.right.toFloat(), it.bottom.toFloat()) },
+                                    bottomBarRect = barBox.takeIf { it.width > 0 }
+                                        ?.let { ScreenRect(it.left.toFloat(), it.top.toFloat(), it.right.toFloat(), it.bottom.toFloat()) },
                                     onWavesStarted = { wavesDoneId = null },
-                                    onWavesFinished = { wavesDoneId = selectedEvent?.identity },
+                                    onWavesFinished = {
+                                        if (!hasProtectedWarning) {
+                                            wavesDoneId = selectedEvent?.identity
+                                        }
+                                    },
                                     active = section == 0,
                                 )
                                 // One measured, scrollable stack: no fixed offsets that collide at large font scales.
@@ -158,7 +173,8 @@ fun QuakeApp(container: AppContainer) {
                                     }
                                     .verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     // 首页顶部只保留地震 HUD；标题/状态栏、预警引导与无事件占位均已移除。
-                                    val hud = selectedEvent?.takeIf { it.identity != wavesDoneId }
+                                    val targetEvent = if (hasProtectedWarning) (activeWarning ?: selectedEvent) else selectedEvent
+                                    val hud = targetEvent?.takeIf { hasProtectedWarning || it.identity != wavesDoneId }
                                     if (hud != null) {
                                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                             QuakeHudCard(hud, dark, standard = settings.intensityStandard,
@@ -179,8 +195,22 @@ fun QuakeApp(container: AppContainer) {
                                         }
                                     }
                                 }
+                                // 平板/大屏：底栏胶囊收窄居中后左上角留出空位。左下角数据源若能在
+                                // 胶囊左侧放得下（内容宽度 + 最小边距）就下移，与胶囊垂直居中；否则
+                                // （手机窄屏、源名过长）保持默认抬升，避免与胶囊交叠。
+                                val minCornerGapPx = with(density) { 12.dp.toPx() }
+                                val badgeContentWpx = maxOf(sourceLabelW, clockLabelW)
+                                val badgeFitsLeft = barBox.width > 0 && badgeContentWpx > 0 &&
+                                    badgeContentWpx + 2 * minCornerGapPx <= barBox.left
+                                val sourceBottomPad = if (badgeFitsLeft && sourceBox.height > 0) {
+                                    val screenHpx = with(density) { maxHeight.toPx() }
+                                    val pillCenterY = barBox.top + barBox.height / 2f
+                                    val colBottomY = pillCenterY + sourceBox.height / 2f
+                                    with(density) { (screenHpx - colBottomY).toDp() }
+                                        .coerceAtLeast(navBottom + 8.dp)
+                                } else 104.dp + navBottom
                                 Column(Modifier.align(Alignment.BottomStart)
-                                    .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 104.dp + navBottom)
+                                    .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = sourceBottomPad)
                                     .fillMaxWidth(0.68f).widthIn(max = 360.dp)
                                     .heightIn(max = maxHeight * 0.3f).verticalScroll(rememberScrollState())
                                     .onGloballyPositioned { c ->
@@ -190,8 +220,10 @@ fun QuakeApp(container: AppContainer) {
                                     },
                                     verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     // 左下角数据源状态（对齐桌面端）：时钟徽章之上。
-                                    SourceStatusLabel(activeSourceInfos, dark)
-                                    NtpClockLabel(clockInfo, dark)
+                                    SourceStatusLabel(activeSourceInfos, dark,
+                                        modifier = Modifier.onSizeChanged { sourceLabelW = it.width })
+                                    NtpClockLabel(clockInfo, dark,
+                                        modifier = Modifier.onSizeChanged { clockLabelW = it.width })
                                 }
                             }
                         }

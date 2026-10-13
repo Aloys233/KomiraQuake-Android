@@ -211,6 +211,8 @@ class QuakeRepository(
             return
         }
         val newEvent = lifecycle.events.none { it.identity == event.identity }
+        val currentIsProtected = _activeWarning.value?.let { isProtectedAlert(it) } == true
+        val eventIsProtected = isProtectedAlert(event)
         val decision = lifecycle.accept(event)
         if (decision == EventGateDecision.STALE || decision == EventGateDecision.DUPLICATE) {
             // 墓碑与门控去重都归为 STALE/DUPLICATE，但成因不同：前者是「这个事件已结束过」，
@@ -220,15 +222,24 @@ class QuakeRepository(
             return
         }
         if (!event.isCanceled && newEvent) {
-            selectedWarning = event.identity
-            _activeWarning.value = event
-            _mapFocus.value = event
-            _mapCameraRequest.value++
+            if (currentIsProtected && !eventIsProtected) {
+                // 当前已有触发本地烈度限制且有倒计时的关键预警，而新事件未达门槛：不抢占焦点
+            } else {
+                selectedWarning = event.identity
+                _activeWarning.value = event
+                _mapFocus.value = event
+                _mapCameraRequest.value++
+            }
         }
         publish()
-        onAlert(event)
+        if (!currentIsProtected || eventIsProtected) {
+            onAlert(event)
+        }
         simulated.onAdmission(event, "applied")
     }
+
+    private fun isProtectedAlert(e: EarthquakeEvent): Boolean =
+        !e.isCanceled && AlertPolicy.evaluate(e, settings.current).eligible && e.remainingSeconds(now()) >= 0
 
     @Synchronized private fun recalculate() {
         val user = userPosition(); val standard = settings.current.intensityStandard
@@ -247,7 +258,12 @@ class QuakeRepository(
         _activeWarnings.value = events
         // 全部活动事件按发震时刻倒序（最新在前）；HUD 默认展示最新，左右切换改变选中项。
         val ordered = events.sortedByDescending { it.timestamp }
-        val selected = ordered.firstOrNull { it.identity == selectedWarning } ?: ordered.firstOrNull()
+        val currentSelected = ordered.firstOrNull { it.identity == selectedWarning }
+        val selected = if (currentSelected != null && isProtectedAlert(currentSelected)) {
+            currentSelected
+        } else {
+            ordered.firstOrNull { isProtectedAlert(it) } ?: currentSelected ?: ordered.firstOrNull()
+        }
         selectedWarning = selected?.identity
         _activeWarning.value = selected
         _hudCount.value = ordered.size

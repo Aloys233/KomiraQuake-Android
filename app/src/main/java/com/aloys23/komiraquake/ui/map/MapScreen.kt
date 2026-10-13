@@ -103,7 +103,7 @@ internal const val TILE_SIZE = 256
 private const val WAVE_TABLE_SWITCH_KM = 2000.0
 private const val WAVE_MAX_RADIUS_KM = 10000.0
 private const val WAVE_WINDOW_MS = 60L * 60L * 1000L
-/** 波前隐去的烈度阈值（CSIS I：可感下限）；超过该烈度对应的半径后波前渐隐。 */
+/** 波前隐去的烈度阈值（CSIS I：可感下限）；只在到达前最后一点范围内快速淡出。 */
 private const val CSIS_FADE_LEVEL = 1.0
 
 /** 视口外预取一圈瓦片；手势期间优先保证当前视口，避免预取请求挡住可见内容。 */
@@ -120,8 +120,10 @@ private const val TILE_FALLBACK_MIN_SUBPX = 24f
 private const val UNDERLAY_MAX_MS = 1500L
 private const val MIN_ZOOM = 1f
 private const val MAX_ZOOM = 18f
-/** 用户定位默认镜头：比全国概览（zoom 6）近一级，便于确认当前位置。 */
-internal const val USER_LOCATION_ZOOM = 7f
+/** 用户定位与全国概览的默认镜头，和桌面端 MapView 的初始 zoom 保持一致。 */
+internal const val USER_LOCATION_ZOOM = 6f
+/** 无定位时的默认全国视野，和桌面端 MapView 的初始 zoom 保持一致。 */
+internal const val DEFAULT_OVERVIEW_ZOOM = 6f
 /**
  * 省级分界线（province 层）出现的最小层级：全国概览及更远处省界会糊成一团噪声，
  * 拉近到 z5 才画。与桌面端 `MapView.provinceBorderMinZoom` 对齐。
@@ -134,13 +136,14 @@ private val LN2 = ln(2.0)
 
 /** 程序化镜头补间时长（ms）：对齐桌面端 cameraDuration。 */
 private const val CAMERA_TWEEN_MS = 420L
+/** 事件结束后保留当前镜头的时间，再回到默认镜头。 */
+private const val EVENT_END_RESET_DELAY_MS = 2L * 60L * 1000L
 /** 缩放按钮步进补间时长（ms）：对齐桌面端 zoomDuration。 */
 private const val ZOOM_TWEEN_MS = 180L
 /** 波前半径显示平滑时长（ms）：对齐桌面端 Behavior，掩盖目标值的台阶。 */
 private const val WAVE_SMOOTH_MS = 120.0
-/** 波前圆与可用区边界之间的余量（dp）：让 2px 描边和震中 X 标记不贴边、不被裁。 */
-private val WAVE_FIT_MARGIN_DP = 8.dp
-
+/** 跟随相机向波前目标缩放的平滑时长（ms）：对应桌面端 zoom Behavior。 */
+private const val FOLLOW_CAMERA_SMOOTH_MS = 120.0
 /** 目标镜头（中心经纬度 + 缩放）。 */
 private data class Camera(val lat: Double, val lon: Double, val zoom: Float)
 
@@ -163,6 +166,7 @@ internal data class FocusCameraKey(
     val widthPx: Float,
     val heightPx: Float,
     val topOcclusionPx: Float,
+    val hudWidthPx: Float,
 )
 
 internal fun focusCameraKey(
@@ -172,6 +176,7 @@ internal fun focusCameraKey(
     widthPx: Float,
     heightPx: Float,
     topOcclusionPx: Float,
+    hudWidthPx: Float = 0f,
 ) = FocusCameraKey(
     identity = event?.identity,
     timestamp = event?.timestamp,
@@ -184,6 +189,7 @@ internal fun focusCameraKey(
     widthPx = widthPx,
     heightPx = heightPx,
     topOcclusionPx = topOcclusionPx,
+    hudWidthPx = hudWidthPx,
 )
 
 /**
@@ -279,6 +285,17 @@ val Vector = Basemap(
 val Basemaps = listOf(AmapVector, Petal, Osm, Vector)
 
 internal fun worldSize(z: Int) = TILE_SIZE.toDouble() * 2.0.pow(z)
+
+/**
+ * 视口把世界完整铺满所需的最小缩放。低于它，纵向（不环绕）就会在容器里留出一条背景带
+ * ——看起来就是「缩成了长方形」；横向虽会环绕，但同样会重复世界，所以也取这条下界。
+ * 与桌面端 `MapView.minZoom` 同式。
+ */
+internal fun minZoomForViewport(widthPx: Float, heightPx: Float): Float {
+    if (widthPx <= 0f || heightPx <= 0f) return MIN_ZOOM
+    val cover = ln(maxOf(widthPx, heightPx).toDouble() / TILE_SIZE) / LN2
+    return cover.toFloat().coerceIn(MIN_ZOOM, MAX_ZOOM)
+}
 
 /**
  * Render one integer tile layer through the whole [z, z + 1) zoom interval.
@@ -558,6 +575,21 @@ internal fun focusRadiusKm(pKm: Double, sKm: Double): Double =
     if (pKm < 0.0 && sKm < 0.0) FOCUS_FALLBACK_RADIUS_KM
     else maxOf(FOCUS_MIN_RADIUS_KM, pKm, sKm)
 
+internal fun displayedWaveRadiusOrNull(pKm: Double, sKm: Double): Double? =
+    if (pKm > 0.0 || sKm > 0.0) focusRadiusKm(pKm, sKm) else null
+
+/** 首次/显式聚焦的半径选择，与桌面端 MapView.frameEventImpl 保持一致。 */
+internal fun initialFocusRadiusKm(
+    pKm: Double,
+    sKm: Double,
+    pOpacity: Double,
+    sOpacity: Double,
+): Double {
+    val visibleP = if (pKm > 0.0 && pOpacity > 0.0) pKm else -1.0
+    val visibleS = if (sKm > 0.0 && sOpacity > 0.0) sKm else -1.0
+    return focusRadiusKm(visibleP, visibleS)
+}
+
 /**
  * 屏幕上的一个轴对齐矩形（px，左上原点）。用作波前取景的可用区，或悬浮元素的遮挡区。
  * 公开类型：作为 [MapScreen] 的参数类型出现。
@@ -632,6 +664,25 @@ internal fun largestFreeRect(w: Float, h: Float, occluders: List<ScreenRect>): S
 }
 
 /**
+ * 桌面端 MapView.frameEventImpl 的取景矩形：固定 inset，而不是在遮挡物之间挑最大矩形。
+ * 这样 Android 与桌面端的 zoom 输入保持同一语义；Android 侧的 inset 已经是实际 px。
+ */
+internal fun desktopFocusRect(
+    widthPx: Float,
+    heightPx: Float,
+    hudWidthPx: Float,
+    topInsetPx: Float,
+    bottomInsetPx: Float,
+    rightInsetPx: Float,
+    leftExtraPx: Float = 24f,
+): ScreenRect {
+    val left = minOf(hudWidthPx + leftExtraPx, widthPx * 0.5f)
+    val right = (widthPx - rightInsetPx).coerceAtLeast(left + ScreenRect.MIN_FREE_EDGE)
+    val bottom = (heightPx - bottomInsetPx).coerceAtLeast(topInsetPx + ScreenRect.MIN_FREE_EDGE)
+    return ScreenRect(left, topInsetPx, right, bottom)
+}
+
+/**
  * 让半径 [radiusKm] 的波前圆完整落在 [rect] 内所需的连续 zoom。
  *
  * 半径先在 z=0 下换算成像素，再取宽高比例的较小值——与桌面端 MapView.frameEvent
@@ -644,6 +695,7 @@ internal fun focusZoomForRect(
     rect: ScreenRect,
     maxZoom: Int = MAX_ZOOM.toInt(),
     marginPx: Float = 0f,
+    minZoom: Float = MIN_ZOOM,
 ): Float {
     val cosLat = cos(latitude * PI / 180.0).coerceAtLeast(0.01)
     val radiusAtZeroZoomPx = radiusKm.coerceAtLeast(FOCUS_MIN_RADIUS_KM) * TILE_SIZE /
@@ -652,7 +704,7 @@ internal fun focusZoomForRect(
     val availH = rect.shrink(marginPx).h.coerceAtLeast(ScreenRect.MIN_FREE_EDGE).toDouble()
     val scale = minOf(availW / (2.0 * radiusAtZeroZoomPx), availH / (2.0 * radiusAtZeroZoomPx))
     return (ln(scale.coerceAtLeast(1.0)) / LN2).toFloat()
-        .coerceIn(MIN_ZOOM, minOf(MAX_ZOOM, maxZoom.toFloat()))
+        .coerceIn(minZoom, minOf(MAX_ZOOM, maxZoom.toFloat()))
 }
 
 /**
@@ -677,19 +729,22 @@ internal fun focusCameraCenter(
 }
 
 /**
- * 波前是否已经大到「再往外扩也看不见了」，此时应当冻结镜头、保持当前视野。
- *
- * [IntensityCalculator.waveOpacity] 在 radius 超过 CSIS 可感半径（[fadeKm]）后并不立刻归零，
- * 而是维持 0.25 直到约 8000 km。若不冻结，镜头会一路缩到 MIN_ZOOM 去装一个几乎看不见的圈。
- * 冻结点取 radiusKm >= fadeKm（等价 opacity 已降到 0.25）；之后波前彻底消失时，
- * 由「波前消失 → 回到默认视野」路径接管归位。
+ * 跟随镜头的单帧插值。初始聚焦补间结束后，不能把新的 zoom 目标直接赋给当前镜头，
+ * 否则首个跟随帧会把补间期间累积的波前变化一次性跳完；这与桌面端的 120ms Behavior 不同。
  */
-internal fun shouldHoldCamera(pKm: Double, sKm: Double, fadeKm: Double): Boolean =
-    fadeKm > 0.0 && maxOf(pKm, sKm) >= fadeKm
+internal fun followCameraValue(
+    current: Double,
+    target: Double,
+    dtMs: Double,
+    smoothingMs: Double = FOLLOW_CAMERA_SMOOTH_MS,
+): Double {
+    val k = if (smoothingMs > 0.0) (dtMs / smoothingMs).coerceIn(0.0, 1.0) else 1.0
+    return current + (target - current) * k
+}
 
 /**
  * Compose 自绘栅格瓦片地图。《NATIVE_PORT_SPEC》 §8 / §12。
- * 同一时刻只画一个震中 X 十字（[focusEvent]）；"还年轻"的事件按 10 Hz 画出 P/S 波前圆。
+ * 同一时刻只画一个震中 X 十字（[focusEvent]）；"还年轻"的事件按显示帧率画出 P/S 波前圆。
  */
 @Composable
 fun MapScreen(
@@ -711,12 +766,19 @@ fun MapScreen(
     /** 与桌面端右侧 layers 按钮一致；详情地图不提供时隐藏该按钮。 */
     onCycleBasemap: (() -> Unit)? = null,
     topOcclusion: androidx.compose.ui.unit.Dp = 310.dp,
+    /** 顶部 HUD 宽度（实际 px），对应桌面端 MapView.hudWidth。 */
+    hudWidthPx: Float = 0f,
     /**
      * 上层实测出来的悬浮控件遮挡矩形（**窗口坐标** px，左上原点）。
-     * 波前取景会挑「不与任何遮挡交叠的最大空白矩形」把圆放进去，因此 P 波不会被
-     * 底栏、左下徽章或 HUD 压住。空列表表示无额外遮挡。
+     * 用于控件布局和尺寸测量；波前取景本身按桌面端的 HUD/边缘 inset 规则计算可视区域，
+     * 不再从空白矩形搜索结果推导 zoom。空列表表示无额外遮挡。
      */
     occlusionRects: List<ScreenRect> = emptyList(),
+    /**
+     * 悬浮底栏胶囊的实测包围盒（**窗口坐标** px）。平板/大屏上胶囊收窄并居中后，右下角控件
+     * 若能在其右侧放得下就下移到与胶囊同高；为 null（未测量到 / 详情页地图）时保持默认抬升。
+     */
+    bottomBarRect: ScreenRect? = null,
     /** 波前出现/结束回调：供上层收起 HUD。 */
     onWavesStarted: () -> Unit = {},
     onWavesFinished: () -> Unit = {},
@@ -726,10 +788,8 @@ fun MapScreen(
     idleResetMs: Long = 20_000L,
     /** 是否为当前可见页：常驻 Pager 中不可见时暂停动画循环，避免占用 UI 线程。 */
     active: Boolean = true,
-    /** 在栅格底图之上叠加矢量层（省界 / 区县着色）。对齐桌面端 vectorOverlay。 */
+    /** 在栅格底图之上叠加矢量层（省界 / 区县）；开启时预警按区县烈度着色。对齐桌面端 vectorOverlay。 */
     vectorOverlay: Boolean = false,
-    /** 区县 EEW 烈度着色开关。对齐桌面端 districtShading。 */
-    districtShading: Boolean = true,
 ) {
     val glass = LocalMapGlass.current
     // 地图自身在窗口里的原点：上层给的遮挡矩形是窗口坐标，要减掉它才得到地图坐标。
@@ -737,7 +797,7 @@ fun MapScreen(
     var windowOrigin by remember { mutableStateOf(Offset.Zero) }
     var centerLat by remember { mutableDoubleStateOf(35.0) }
     var centerLon by remember { mutableDoubleStateOf(105.0) }
-    var zoom by remember { mutableFloatStateOf(6f) }
+    var zoom by remember { mutableFloatStateOf(DEFAULT_OVERVIEW_ZOOM) }
 
     // 矢量底图数据（3.7 MiB，assets）。缺失或损坏时为 null，地图退回纯栅格。
     val context = LocalContext.current
@@ -749,10 +809,11 @@ fun MapScreen(
     val vectorGcjShift = !vectorOnly && basemap.isGcj02
 
     // 区县名 -> CSIS 烈度。每次焦点事件变化时在后台线程算一次，绝不在绘制路径上算。
+    // 着色跟随矢量图层：纯矢量底图本就画矢量，栅格底图需开启「叠加矢量层」。
     var districtIntensity by remember { mutableStateOf<Map<String, Double>>(emptyMap()) }
-    LaunchedEffect(focusEvent?.identity, districtShading, vectorActive, vectorRenderer) {
+    LaunchedEffect(focusEvent?.identity, vectorActive, vectorRenderer) {
         val event = focusEvent
-        if (event == null || !districtShading || !vectorActive || vectorRenderer == null ||
+        if (event == null || !vectorActive || vectorRenderer == null ||
             event.magnitude <= 0.0
         ) {
             districtIntensity = emptyMap()
@@ -770,6 +831,9 @@ fun MapScreen(
     val cameraScope = rememberCoroutineScope()
     var cameraJob by remember { mutableStateOf<Job?>(null) }
     var cameraAnimating by remember { mutableStateOf(false) }
+    var cameraAnimationStartedAtMs by remember { mutableStateOf(0L) }
+    var cameraAnimationGeneration by remember { mutableStateOf(0L) }
+    var eventEndResetJob by remember { mutableStateOf<Job?>(null) }
     var lastCameraAnimationKey by remember { mutableStateOf<CameraAnimationKey?>(null) }
     var previousBasemapIsGcj02 by remember { mutableStateOf(basemap.isGcj02) }
 
@@ -784,6 +848,10 @@ fun MapScreen(
     val latestFocusIdentity = rememberUpdatedState(focusEvent?.identity)
     val latestOnWavesStarted = rememberUpdatedState(onWavesStarted)
     val latestOnWavesFinished = rememberUpdatedState(onWavesFinished)
+    fun cancelEventEndReset() {
+        eventEndResetJob?.cancel()
+        eventEndResetJob = null
+    }
     // 手势事件不进入 Compose Snapshot；每帧写 Snapshot 会额外唤醒所有观察者。
     val interactionEvents = remember {
         MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
@@ -825,9 +893,12 @@ fun MapScreen(
         waveEligible,
         active,
     ) {
+        // 事件切换时先清掉 A 事件的目标，避免 B 事件的镜头中心已经开始移动，
+        // 但 zoom 还按上一场地震的波前半径计算。
+        waveP.value = -1.0
+        waveS.value = -1.0
         val event = focusEvent
         if (!active || event == null || !waveEligible || event.timestamp <= 0) {
-            waveP.value = -1.0; waveS.value = -1.0
             return@LaunchedEffect
         }
         while (true) {
@@ -847,9 +918,10 @@ fun MapScreen(
                 waveP.value = visibleRadius(p)
                 waveS.value = visibleRadius(s)
             }
-            // 跟随时按显示帧率刷新，波前缩放的跟随才够细腻（不在一格一格地跳）；
-            // 未跟随时 100ms 足够画波前圆，避免整屏无谓重组。
-            if (following) withFrameNanos { } else delay(100)
+            // 有资格自动聚焦的事件始终按显示帧率刷新。不能只看 following：事件切换时
+            // following 与相机补间由不同协程更新，短暂落回 100ms 会让自动 zoom 一格一格追赶。
+            // waveP/waveS 只被帧循环和 snapshotFlow 消费，不会因此重组整块地图。
+            if (waveEligible || following) withFrameNanos { } else delay(100)
         }
     }
     // 波前半径显示值：向目标半径平滑追平（对齐桌面端 Behavior），避免目标值的台阶让圆一圈一圈地跳。
@@ -860,6 +932,14 @@ fun MapScreen(
     // 见 BoxWithConstraints 内的「波前平滑 + 相机跟随」段。
     var dispPKm by remember { mutableDoubleStateOf(0.0) }
     var dispSKm by remember { mutableDoubleStateOf(0.0) }
+
+    // 只在 identity 变化时重置显示半径；同一事件的坐标/震级修正仍保持平滑过渡。
+    LaunchedEffect(focusEvent?.identity) {
+        val identity = focusEvent?.identity
+        if (identity != null) cancelEventEndReset()
+        dispPKm = 0.0
+        dispSKm = 0.0
+    }
 
     BoxWithConstraints(
         modifier = modifier.clip(RoundedCornerShape(0.dp))
@@ -872,6 +952,8 @@ fun MapScreen(
         val density = LocalDensity.current
         val widthPx = with(density) { maxWidth.toPx() }
         val heightPx = with(density) { maxHeight.toPx() }
+        // 视口相关的最小缩放：世界必须铺满容器，否则缩到底会露背景（“长方形”）。
+        val minZoom = minZoomForViewport(widthPx, heightPx)
         val scheme = MiuixTheme.colorScheme
         // 矢量配色：跟随主题，深色下描边更亮，避免糊成一片。
         val landFillColor = scheme.surfaceContainer
@@ -890,28 +972,36 @@ fun MapScreen(
             .map { ScreenRect(it.l - ox, it.t - oy, it.r - ox, it.b - oy) }
             .map { ScreenRect(it.l.coerceIn(0f, widthPx), it.t.coerceIn(0f, heightPx), it.r.coerceIn(0f, widthPx), it.b.coerceIn(0f, heightPx)) }
             .filter { it.w > 0f && it.h > 0f }
-        val occluders = buildList {
-            // 没有实测值时退回通栏顶栏（HUD 大多数时候确实通栏），有实测值则用精确矩形。
-            if (measured.isEmpty() && topInsetPx > 0f) add(ScreenRect(0f, 0f, widthPx, topInsetPx))
-            add(ScreenRect((widthPx - sideInsetPx).coerceAtLeast(0f), 0f, widthPx, heightPx))
-            if (measured.none { it.b >= heightPx - 1f }) {
-                add(ScreenRect(0f, (heightPx - bottomInsetPx).coerceAtLeast(0f), widthPx, heightPx))
-            }
-            addAll(measured)
-        }
-
-        /** 波前取景的可用区：自由区内面积最大的空白矩形，四周再留出描边余量。 */
+        // 与桌面端 hudWidth 同语义：只取顶部 HUD 自身宽度，不把底栏/工具条算进左 inset。
+        val measuredHudWidthPx = measured
+            .filter { it.t < topInsetPx && it.b <= topInsetPx + 1f }
+            .maxOfOrNull { it.w } ?: 0f
+        val focusHudWidthPx = hudWidthPx.takeIf { it > 0f } ?: measuredHudWidthPx
+        // 桌面端 bottomBadgeHeight 是底部状态区高度；Android 有实测底栏时取实测值，
+        // 没测到时使用与原布局一致的保守下界。
+        val measuredBottomInsetPx = measured
+            .filter { it.b >= heightPx - 1f }
+            .maxOfOrNull { heightPx - it.t } ?: bottomInsetPx
+        val focusBottomInsetPx = maxOf(bottomInsetPx, measuredBottomInsetPx)
+        /** 波前取景的可用区：沿用桌面端的固定 inset 取景矩形。 */
         fun freeRect(): ScreenRect =
-            largestFreeRect(widthPx, heightPx, occluders).shrink(with(density) { WAVE_FIT_MARGIN_DP.toPx() })
+            desktopFocusRect(
+                widthPx = widthPx,
+                heightPx = heightPx,
+                hudWidthPx = focusHudWidthPx,
+                topInsetPx = topInsetPx,
+                bottomInsetPx = focusBottomInsetPx,
+                rightInsetPx = sideInsetPx,
+                leftExtraPx = with(density) { 24.dp.toPx() },
+            )
 
-        /** 中国版图概览镜头（大陆 + 海南 + 台湾）。整数层级，静止时瓦片 1:1 渲染。 */
+        /** 中国版图概览镜头（大陆 + 海南 + 台湾）。固定从桌面端一致的 z=6 起步。 */
         fun chinaCamera(): Camera {
             val lonMin = 73.5; val lonMax = 135.1; val latMin = 18.0; val latMax = 53.6
             val x0 = normX(lonMin); val x1 = normX(lonMax)
             val y0 = normY(latMax); val y1 = normY(latMin)
             val rect = freeRect()
-            val scale = minOf(rect.w / (x1 - x0), rect.h / (y1 - y0))
-            val z = floor(ln(scale / TILE_SIZE) / LN2).toFloat().coerceIn(MIN_ZOOM, minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
+            val z = DEFAULT_OVERVIEW_ZOOM
             val world = TILE_SIZE * 2.0.pow(z.toDouble())
             val (cx, cy) = focusCameraCenter((x0 + x1) / 2.0, (y0 + y1) / 2.0, world, rect, widthPx, heightPx)
             val lon = wrapLon(cx * 360.0 - 180.0)
@@ -943,9 +1033,12 @@ fun MapScreen(
                 val elapsedMs = AppClock.now() - event.timestamp
                 if (elapsedMs in 0L..WAVE_WINDOW_MS) {
                     val (p, s) = waveRadii(event.depth, elapsedMs / 1000.0)
-                    fun visibleRadius(r: Double): Double =
-                        if (r > 0.0 && IntensityCalculator.waveOpacity(r, waveFadeKm) > 0.0) r else -1.0
-                    focusRadiusKm(visibleRadius(p), visibleRadius(s))
+                    initialFocusRadiusKm(
+                        pKm = p,
+                        sKm = s,
+                        pOpacity = if (p > 0.0) IntensityCalculator.waveOpacity(p, waveFadeKm) else 0.0,
+                        sOpacity = if (s > 0.0) IntensityCalculator.waveOpacity(s, waveFadeKm) else 0.0,
+                    )
                 } else {
                     focusRadiusKm(-1.0, -1.0)
                 }
@@ -958,6 +1051,7 @@ fun MapScreen(
                 latitude = lat,
                 rect = rect,
                 maxZoom = basemap.maxZoom,
+                minZoom = minZoom,
             )
             val world = TILE_SIZE * 2.0.pow(z.toDouble())
             // 镜头中心必须对齐扣除遮挡后的可用区中心，而不是整屏中心。
@@ -972,34 +1066,70 @@ fun MapScreen(
          * animate=false / 减少动态效果时立即生效（用于逐帧跟随）。
          */
         fun applyCamera(cam: Camera, durationMs: Long, animate: Boolean) {
+            val generation = cameraAnimationGeneration + 1L
+            cameraAnimationGeneration = generation
             cameraJob?.cancel()
-            val targetLon = wrapLon(centerLon + wrappedDelta((cam.lon - centerLon) / 360.0) * 360.0)
+            // 容器变大（旋转/改窗口）后旧镜头可能低于新下界：抬到最小缩放，别落在会露背景的档位。
+            val target = cam.copy(zoom = cam.zoom.coerceIn(minZoom, MAX_ZOOM))
+            val targetLon = wrapLon(centerLon + wrappedDelta((target.lon - centerLon) / 360.0) * 360.0)
             if (!animate || reduceMotion || durationMs <= 0L) {
                 cameraAnimating = false
-                centerLat = cam.lat
+                cameraAnimationStartedAtMs = 0L
+                cameraJob = null
+                centerLat = target.lat
                 centerLon = targetLon
-                zoom = cam.zoom
+                zoom = target.zoom
                 return
             }
             val startLat = centerLat; val startLon = centerLon; val startZoom = zoom
             cameraAnimating = true
+            cameraAnimationStartedAtMs = AppClock.elapsedMs()
             cameraJob = cameraScope.launch {
-                val startNanos = withFrameNanos { it }
-                while (true) {
-                    val now = withFrameNanos { it }
-                    val t = ((now - startNanos) / 1_000_000.0 / durationMs).coerceIn(0.0, 1.0)
-                    val e = easeOutCubic(t)
-                    centerLat = startLat + (cam.lat - startLat) * e
-                    centerLon = wrapLon(startLon + (targetLon - startLon) * e)
-                    zoom = (startZoom + (cam.zoom - startZoom) * e).toFloat()
-                    if (t >= 1.0) break
+                try {
+                    val startNanos = withFrameNanos { it }
+                    while (true) {
+                        val now = withFrameNanos { it }
+                        val t = ((now - startNanos) / 1_000_000.0 / durationMs).coerceIn(0.0, 1.0)
+                        val e = easeOutCubic(t)
+                        centerLat = startLat + (target.lat - startLat) * e
+                        centerLon = wrapLon(startLon + (targetLon - startLon) * e)
+                        zoom = (startZoom + (target.zoom - startZoom) * e).toFloat()
+                        if (t >= 1.0) break
+                    }
+                } finally {
+                    if (cameraAnimationGeneration == generation) {
+                        cameraAnimating = false
+                        cameraAnimationStartedAtMs = 0L
+                        cameraJob = null
+                    }
                 }
-                cameraAnimating = false
             }
         }
 
         /** 手势接管镜头：停掉补间，避免与拖动/捏合互相打架。 */
-        fun stopCameraAnimation() { cameraJob?.cancel(); cameraJob = null; cameraAnimating = false }
+        fun stopCameraAnimation() {
+            cameraAnimationGeneration += 1L
+            cameraJob?.cancel()
+            cameraJob = null
+            cameraAnimating = false
+            cameraAnimationStartedAtMs = 0L
+        }
+        /**
+         * 波前跟随专用的相机推进：不启动/取消程序化补间，只沿桌面端 Behavior 的
+         * 120ms 时间常数靠近当前波前目标，避免首个跟随帧直接跳 zoom。
+         */
+        fun applyFollowCamera(cam: Camera, dtMs: Double) {
+            val target = cam.copy(zoom = cam.zoom.coerceIn(minZoom, MAX_ZOOM))
+            // 保留跨 ±180° 的最短路径终点，插值完成后再归一化；否则 179° → -179° 会绕半圈。
+            val targetLon = centerLon + wrappedDelta((target.lon - centerLon) / 360.0) * 360.0
+            centerLat = followCameraValue(centerLat, target.lat, dtMs)
+            centerLon = wrapLon(followCameraValue(centerLon, targetLon, dtMs))
+            zoom = followCameraValue(zoom.toDouble(), target.zoom.toDouble(), dtMs).toFloat()
+        }
+        // 视口变化（旋转/改窗口）后若当前缩放已低于新下界，立即抬到最小缩放，避免露背景带。
+        LaunchedEffect(minZoom) {
+            if (zoom < minZoom) zoom = minZoom
+        }
         // 有显式焦点则平滑取景震中；否则平滑回到默认视野（我的位置 / 全国概览）。
         // 视口/遮挡变化也必须重算：Android 首帧布局未稳定时若用 0 尺寸算出的目标镜头，
         // 原实现会在动画期间跳过后续尺寸更新，导致聚焦事件不自动缩放。
@@ -1010,6 +1140,7 @@ fun MapScreen(
             widthPx = widthPx,
             heightPx = heightPx,
             topOcclusionPx = topInsetPx,
+            hudWidthPx = focusHudWidthPx,
         )) {
             if (widthPx <= 0f || heightPx <= 0f) return@LaunchedEffect
             val animationKey = cameraAnimationKey(
@@ -1019,6 +1150,13 @@ fun MapScreen(
             )
             val previousAnimationKey = lastCameraAnimationKey
             val animationBoundary = previousAnimationKey == null || previousAnimationKey != animationKey
+            val bootstrapCamera = previousAnimationKey == null
+
+            // 首次布局时 centerLat/centerLon/zoom 只是占位值，不能把它们当成真实起点
+            // 播放动画；先建立用户位置/全国概览的稳定镜头，再从这个镜头前往震中。
+            if (bootstrapCamera) {
+                applyCamera(defaultCamera(), durationMs = 0L, animate = false)
+            }
 
             if (hasFocus) {
                 // 尺寸变化只在自动跟随时重取景；用户已经拖动/缩放后不能被 HUD
@@ -1036,8 +1174,10 @@ fun MapScreen(
             } else if (!userMovedCamera) {
                 lastCameraAnimationKey = animationKey
                 following = false
-                val animate = previousAnimationKey == null || previousAnimationKey.hasFocus
-                applyCamera(defaultCamera(), CAMERA_TWEEN_MS, animate = animate)
+                // 首次默认镜头已经在上面直接建立；只有从已有焦点返回默认视野时才播放补间。
+                if (!bootstrapCamera) {
+                    applyCamera(defaultCamera(), CAMERA_TWEEN_MS, animate = previousAnimationKey?.hasFocus == true)
+                }
             } else {
                 // 记录当前焦点边界，避免用户手动操作后，同一事件的普通数据更新被误判为
                 // 一次新的聚焦；之后真正的新事件仍会因 identity 变化重新聚焦。
@@ -1067,12 +1207,9 @@ fun MapScreen(
         val focusCameraFor by rememberUpdatedState<(Double) -> Camera?> { radiusKm ->
             focusCamera(radiusKm)
         }
-        val holdCameraFor by rememberUpdatedState<(Double, Double) -> Boolean> { pKm, sKm ->
-            shouldHoldCamera(pKm, sKm, waveFadeKm)
-        }
         // 波前平滑 + 相机跟现在同一个循环里：取景用的半径就是绘制用的那个平滑值，
         // 两者不会差一个 WAVE_SMOOTH_MS 的滞后，zoom 因此连续。
-        LaunchedEffect(active) {
+        LaunchedEffect(active, waveEligible, hasFocus, focusEvent?.identity) {
             if (!active) return@LaunchedEffect
             var last = withFrameNanos { it }
             while (true) {
@@ -1098,16 +1235,24 @@ fun MapScreen(
                     if (tp > 0.0 && dispPKm != tp) dispPKm += (tp - dispPKm) * k
                     if (ts > 0.0 && dispSKm != ts) dispSKm += (ts - dispSKm) * k
                 }
-                // 入场 420ms 补间进行中不抢镜头：applyCamera 会无条件 cancel 掉 cameraJob。
-                if (!following || !hasFocus || cameraAnimating) continue
-                // 波前已大到看不见（超过 CSIS 可感半径）就冻住，不再继续缩小。
-                if (holdCameraFor(dispPKm, dispSKm)) continue
+                // 两条波都已隐藏：让波前结束监听负责回默认镜头，不再先套一次 300 km 兜底。
+                if (tp <= 0.0 && ts <= 0.0) continue
+                if (!following || !hasFocus) continue
+                // 初始聚焦动画最多只占用一个桌面端 cameraDuration。若 Android 的
+                // frame clock/协程取消让 cameraAnimating 没有及时清零，不能因此永久
+                // 阻塞波前跟随；超时后强制接管，后续按帧平滑追目标。
+                if (cameraAnimating) {
+                    val startedAt = cameraAnimationStartedAtMs
+                    if (startedAt <= 0L || AppClock.elapsedMs() - startedAt < CAMERA_TWEEN_MS) continue
+                    stopCameraAnimation()
+                }
                 focusCameraFor(focusRadiusKm(dispPKm, dispSKm))
-                    ?.let { applyCamera(it, 0L, animate = false) }
+                    ?.let { applyFollowCamera(it, dt) }
             }
         }
-        // 波前全部消失（走完/淡出/事件结束）：若仍在跟随震中，自动回到我的位置（无定位则全国概览），
-        // 并通知上层收起 HUD。用户已手动操作过镜头（following=false）时不抢镜头。
+        // 波前全部消失（走完/淡出/事件结束）：若仍在跟随震中，立即解除跟随，
+        // 保留当前镜头 2 分钟后再回到我的位置（无定位则全国概览）。
+        // 用户已手动操作过镜头（following=false）时不抢镜头。
         LaunchedEffect(Unit) {
             snapshotFlow { waveP.value > 0.0 || waveS.value > 0.0 }
                 .distinctUntilChanged()
@@ -1128,8 +1273,18 @@ fun MapScreen(
                         // 切换到新事件时，旧事件的波前协程会先把 waveP/waveS 清零。
                         // 这个 false 不是“新事件波前结束”，不能把刚完成的自动聚焦又拉回默认视野。
                         if (isCurrentEvent && following) {
+                            // 波前消失即视为当前事件结束：立即解除跟随，
+                            // 但把镜头保留 2 分钟后再回默认位置。
                             following = false
-                            applyCamera(defaultCamera(), CAMERA_TWEEN_MS, animate = true)
+                            cancelEventEndReset()
+                            eventEndResetJob = cameraScope.launch {
+                                delay(EVENT_END_RESET_DELAY_MS)
+                                val currentIdentity = latestFocusIdentity.value
+                                val sameEventOrCleared = currentIdentity == finishedIdentity || currentIdentity == null
+                                if (sameEventOrCleared) {
+                                    applyCamera(defaultCamera(), CAMERA_TWEEN_MS, animate = true)
+                                }
+                            }
                         }
                         if (isCurrentEvent) latestOnWavesFinished.value()
                     }
@@ -1329,6 +1484,7 @@ fun MapScreen(
                 .pointerInput(basemap.id) {
                     detectTransformGestures { centroid, pan, gestureZoom, _ ->
                         stopCameraAnimation()
+                        cancelEventEndReset()
                         following = false
                         userMovedCamera = true
                         interactionEvents.tryEmit(Unit)
@@ -1337,7 +1493,7 @@ fun MapScreen(
 
                         // 屏上尺度：worldSize(z)·tileScale == TILE_SIZE·2^zoom，与 z 的取整无关。
                         val dZoom = (ln(gestureZoom.toDouble()) / LN2 * ZOOM_SENSITIVITY).toFloat()
-                        val newZoom = (zoom + dZoom).coerceIn(MIN_ZOOM, minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
+                        val newZoom = (zoom + dZoom).coerceIn(minZoom, minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
                         val kOld = TILE_SIZE * 2f.pow(zoom)
                         val kNew = TILE_SIZE * 2f.pow(newZoom)
 
@@ -1353,8 +1509,12 @@ fun MapScreen(
 
                         val z = newZoom.roundToInt().coerceIn(MIN_ZOOM.toInt(), basemap.maxZoom)
                         val world = worldSize(z)
+                        // 纵向不环绕：把中心限制在"视口不出世界"的范围里，缩到最小也不会露出背景带。
+                        // 视口半高占世界高度的比例（用连续 newZoom，保证与屏幕实际尺度一致）。
+                        val halfFrac = viewH / 2.0 / (TILE_SIZE * 2.0.pow(newZoom.toDouble()))
+                        val ny = if (halfFrac < 0.5) centerNy.coerceIn(halfFrac, 1.0 - halfFrac) else 0.5
                         centerLon = wrapLon(unprojLon(centerNx * world, z))
-                        centerLat = unprojLat(centerNy.coerceIn(0.0, 1.0) * world, z)
+                        centerLat = unprojLat(ny * world, z)
                         zoom = newZoom
                     }
                 },
@@ -1442,21 +1602,23 @@ fun MapScreen(
 
                 // 矢量层：世界陆地 / 省界 / 区县（EEW 时按烈度着色）。
                 // 压在瓦片之上、波前之下 —— 预警时用户既要看底图也要看烈度分布。
-                vectorRenderer?.let { renderer ->
-                    renderer.districtIntensity = districtIntensity
-                    with(renderer) {
-                    draw(
-                        centerLat = centerLat,
-                        centerLon = centerLon,
-                        zoom = zoom,
-                        gcjShift = vectorGcjShift,
-                        vectorOnly = vectorOnly,
-                        landFill = landFillColor,
-                        coastStroke = provinceStrokeColor,
-                        // 省级分界线只在拉近（z >= 5）后画：全国概览时线条糊成噪声。
-                        provinceStroke = if (zoom >= PROVINCE_BORDER_MIN_ZOOM) provinceStrokeColor
-                                         else Color.Transparent,
-                    )
+                if (vectorActive) {
+                    vectorRenderer?.let { renderer ->
+                        renderer.districtIntensity = districtIntensity
+                        with(renderer) {
+                            draw(
+                                centerLat = centerLat,
+                                centerLon = centerLon,
+                                zoom = zoom,
+                                gcjShift = vectorGcjShift,
+                                vectorOnly = vectorOnly,
+                                landFill = landFillColor,
+                                coastStroke = provinceStrokeColor,
+                                // 省级分界线只在拉近（z >= 5）后画：全国概览时线条糊成噪声。
+                                provinceStroke = if (zoom >= PROVINCE_BORDER_MIN_ZOOM) provinceStrokeColor
+                                                 else Color.Transparent,
+                            )
+                        }
                     }
                 }
 
@@ -1538,8 +1700,20 @@ fun MapScreen(
             } // end map-only backdrop source
 
             // 右下角控件与比例尺要抬到悬浮底栏之上（底栏高约 78dp + 系统导航栏内边距）。
+            // 平板/大屏上底栏胶囊收窄居中，右侧空出来：空间够宽时把整簇下移到与胶囊同高
+            // （比例尺贴胶囊底边，按钮列仍叠在其上），不再悬在中部。
             val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-            val barClearance = navBottom + 90.dp
+            val minCornerGap = 12.dp
+            // 右下角最宽的一件是比例尺（约 96dp），按钮列只有 48dp；按较宽者判断是否放得下。
+            val cornerBlockWidth = 96.dp
+            val barRect = bottomBarRect
+            val availRight = if (barRect != null) (windowOrigin.x + widthPx) - barRect.r else 0f
+            val rightCornerFits = barRect != null && barRect.w > 0f &&
+                availRight >= with(density) { (cornerBlockWidth + minCornerGap * 2).toPx() }
+            val barClearance = if (rightCornerFits && barRect != null) {
+                with(density) { ((windowOrigin.y + heightPx) - barRect.b).toDp() }
+                    .coerceAtLeast(navBottom + 8.dp)
+            } else navBottom + 90.dp
 
             // Foreground controls remain sharp and are never sampled.
             Column(
@@ -1552,6 +1726,7 @@ fun MapScreen(
             ) {
                 // 放大（整数层级 ±1，和桌面端滚轮一致）
                 MapFloatingButton(AppIcon.Plus, dark, "放大地图") {
+                    cancelEventEndReset()
                     following = false
                     userMovedCamera = true
                     interactionEvents.tryEmit(Unit)
@@ -1563,10 +1738,11 @@ fun MapScreen(
                 }
                 // 缩小
                 MapFloatingButton(AppIcon.Minus, dark, "缩小地图") {
+                    cancelEventEndReset()
                     following = false
                     userMovedCamera = true
                     interactionEvents.tryEmit(Unit)
-                    val target = (zoom.roundToInt() - 1).toFloat().coerceAtLeast(MIN_ZOOM)
+                    val target = (zoom.roundToInt() - 1).toFloat().coerceAtLeast(minZoom)
                     if (target < zoom.roundToInt()) {
                         applyCamera(Camera(centerLat, centerLon, target), ZOOM_TWEEN_MS, animate = true)
                     }
@@ -1575,6 +1751,7 @@ fun MapScreen(
                 // 回到我的位置
                 if (userLat != null && userLon != null) {
                     MapFloatingButton(AppIcon.Navigation, dark, "回到我的位置") {
+                        cancelEventEndReset()
                         following = false
                         userMovedCamera = true
                         interactionEvents.tryEmit(Unit)
@@ -1589,10 +1766,13 @@ fun MapScreen(
                         selected = following) {
                         if (following) {
                             following = false
+                            cancelEventEndReset()
                             applyCamera(defaultCamera(), CAMERA_TWEEN_MS, animate = true)
                         } else {
+                            cancelEventEndReset()
                             following = true
-                            focusCamera()?.let { applyCamera(it, CAMERA_TWEEN_MS, animate = true) }
+                            val displayedRadius = displayedWaveRadiusOrNull(dispPKm, dispSKm)
+                            focusCamera(displayedRadius)?.let { applyCamera(it, CAMERA_TWEEN_MS, animate = true) }
                         }
                     }
                 }

@@ -1,5 +1,6 @@
 package com.aloys23.komiraquake.ui.map
 
+import com.aloys23.komiraquake.core.IntensityCalculator
 import com.aloys23.komiraquake.core.TravelTimeService
 import com.aloys23.komiraquake.model.EarthquakeEvent
 import org.junit.Assert.assertEquals
@@ -77,14 +78,16 @@ class MapCameraTest {
     }
 
     @Test
-    fun userLocationFocusUsesCloserZoomThanOverview() {
-        assertTrue(USER_LOCATION_ZOOM > 6f)
+    fun defaultCameraZoomMatchesDesktopInitialZoom() {
+        assertEquals(6f, USER_LOCATION_ZOOM, 0f)
+        assertEquals(6f, DEFAULT_OVERVIEW_ZOOM, 0f)
     }
 
     @Test
     fun noWavesFallsBackTo300Km() {
         // P/S 全部隐藏（历史事件或已离开中国范围）时用固定 300 km。
         assertEquals(300.0, focusRadiusKm(-1.0, -1.0), 0.0)
+        assertTrue(displayedWaveRadiusOrNull(-1.0, -1.0) == null)
     }
 
     @Test
@@ -94,9 +97,34 @@ class MapCameraTest {
     }
 
     @Test
+    fun explicitFocusKeepsVisibleWaveTail() {
+        assertEquals(
+            1800.0,
+            initialFocusRadiusKm(
+                pKm = 1800.0, sKm = 1500.0,
+                pOpacity = 0.20, sOpacity = 0.24,
+            ),
+            0.0,
+        )
+    }
+
+    @Test
+    fun initialFocusKeepsVisibleWaveRadius() {
+        assertEquals(
+            800.0,
+            initialFocusRadiusKm(
+                pKm = 600.0, sKm = 800.0,
+                pOpacity = 0.8, sOpacity = 0.7,
+            ),
+            0.0,
+        )
+    }
+
+    @Test
     fun followsLargerWave() {
         assertEquals(520.0, focusRadiusKm(400.0, 520.0), 0.0)
         assertEquals(520.0, focusRadiusKm(520.0, 400.0), 0.0)
+        assertEquals(520.0, displayedWaveRadiusOrNull(400.0, 520.0) ?: -1.0, 0.0)
     }
 
     @Test
@@ -120,6 +148,18 @@ class MapCameraTest {
     }
 
     @Test
+    fun focusZoomHonorsViewportMinimum() {
+        // 超大半径会把取景一路缩到极小；显式下界要把它抬起来，别缩到露背景带。
+        val zoom = focusZoomForRect(
+            radiusKm = 30000.0, latitude = 35.0,
+            rect = ScreenRect(0f, 0f, 1080f, 2000f),
+            minZoom = 3f,
+        )
+
+        assertEquals(3f, zoom, 0f)
+    }
+
+    @Test
     fun focusZoomUsesTheActualAsymmetricViewport() {
         // 安卓端右侧有工具条、左侧没有侧栏，可用区右边界比对称模型更靠右，
         // 因此同样的半径能取更近的 zoom。
@@ -133,6 +173,18 @@ class MapCameraTest {
         )
 
         assertTrue(asymmetric > symmetric)
+    }
+
+    @Test
+    fun desktopFocusRectUsesScalarInsets() {
+        val rect = desktopFocusRect(
+            widthPx = 1280f, heightPx = 800f,
+            hudWidthPx = 352f, topInsetPx = 232f,
+            bottomInsetPx = 92f, rightInsetPx = 76f,
+            leftExtraPx = 24f,
+        )
+
+        assertEquals(ScreenRect(376f, 232f, 1204f, 708f), rect)
     }
 
     @Test
@@ -233,14 +285,12 @@ class MapCameraTest {
     }
 
     @Test
-    fun cameraHoldsAfterWaveOutgrowsPerceptibleRadius() {
-        // 未达可感半径：继续跟随。
-        assertTrue(!shouldHoldCamera(400.0, 300.0, fadeKm = 1200.0))
-        // 达到可感半径：冻结，不再为看不见的圈继续缩小。
-        assertTrue(shouldHoldCamera(1200.0, 300.0, fadeKm = 1200.0))
-        assertTrue(shouldHoldCamera(300.0, 1500.0, fadeKm = 1200.0))
-        // 震级未知时 fadeKm 退化为量程上限，不应误冻结。
-        assertTrue(!shouldHoldCamera(400.0, 300.0, fadeKm = 0.0))
+    fun cameraFollowAndWaveEndAtCsisRadius() {
+        val fadeKm = 1200.0
+        // 相机跟随到 CSIS I 终点；波前也在同一边界归零。
+        assertTrue(IntensityCalculator.waveOpacity(fadeKm * 0.94, fadeKm) > 0.99)
+        assertTrue(IntensityCalculator.waveOpacity(fadeKm * 0.99, fadeKm) in 0.0..1.0)
+        assertEquals(0.0, IntensityCalculator.waveOpacity(fadeKm, fadeKm), 1e-9)
     }
 
     @Test
@@ -251,6 +301,16 @@ class MapCameraTest {
         if (target > 0.0 && disp <= 0.0) disp = target
 
         assertEquals(target, disp, 0.0)
+    }
+
+    @Test
+    fun followCameraStepInterpolatesAfterInitialFocusInsteadOfSnapping() {
+        val next = followCameraValue(current = 6.0, target = 4.0, dtMs = 16.0)
+
+        // 初始聚焦补间结束后，跟随也必须沿桌面端 120ms Behavior 逐帧靠近目标，
+        // 不能把相差两个 zoom 的目标一帧直接赋进去。
+        assertTrue("next=$next", next < 6.0 && next > 4.0)
+        assertEquals(6.0, followCameraValue(6.0, 4.0, 0.0), 0.0)
     }
 
     @Test
