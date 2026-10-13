@@ -43,6 +43,8 @@ fun EventDetailScreen(
     userLon: Double?,
     basemap: Basemap,
     tileLoader: TileLoader,
+    /** 与主地图一致：在栅格底图上叠加省界 / 区县矢量层。 */
+    vectorOverlay: Boolean = false,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -75,6 +77,7 @@ fun EventDetailScreen(
                     focusEvent = event,
                     // 详情页只定位震中，不画 P/S 波前（历史事件本就没有活动波前）。
                     waveEligible = false, warningActive = false,
+                    vectorOverlay = vectorOverlay,
                     cameraRequest = 0L, topOcclusion = 0.dp,
                     // 详情页地图上方是详情卡片、下方没有悬浮底栏，无额外遮挡。
                     occlusionRects = emptyList(),

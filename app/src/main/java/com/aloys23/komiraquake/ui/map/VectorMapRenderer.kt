@@ -6,7 +6,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.nativeCanvas
 import com.aloys23.komiraquake.core.CoordinateTransform
 import com.aloys23.komiraquake.core.GeoGeometry
 import com.aloys23.komiraquake.core.IntensityCalculator
@@ -34,6 +34,22 @@ class VectorMapRenderer(private val data: VectorMapData?) {
     /** 区县名 -> CSIS 烈度（原始值）。空则区县不着色。 */
     var districtIntensity: Map<String, Double> = emptyMap()
 
+    /** 整数 zoom 的投影几何缓存；连续缩放只变换 Canvas，不重建 Path。 */
+    private data class CachedFeature(
+        val bounds: GeoGeometry.GeoBounds,
+        val path: Path,
+        val hasGeometry: Boolean,
+    )
+
+    private data class GeometryCacheKey(
+        val layerName: String,
+        val zoom: Int,
+        val gcjShift: Boolean,
+        val applyGcj: Boolean,
+    )
+
+    private val geometryCaches = HashMap<GeometryCacheKey, List<CachedFeature>>()
+
     /**
      * @param gcjShift 是否对 WGS-84 顶点施加 GCJ-02 纠偏（叠加到 GCJ-02 栅格底图时为 true）。
      * @param vectorOnly 纯矢量底图：世界陆地需要填充底色与海岸描边；叠加模式只画中国图层。
@@ -52,36 +68,43 @@ class VectorMapRenderer(private val data: VectorMapData?) {
         val view = ViewBounds(frame, size.width, size.height)
 
         // ---- 世界陆地 ------------------------------------------------
-        world?.let { layer ->
-            drawLayer(
-                layer, frame, view, gcjShift = false, applyGcj = false,
-                fill = if (vectorOnly) landFill else Color.Transparent,
-                stroke = if (vectorOnly) coastStroke else Color.Transparent,
-                strokeWidthPx = if (vectorOnly) 1f else 0f,
-                fillOf = null,
-            )
+        // 叠加模式下世界层完全透明，不进入逐帧裁剪/绘制路径。
+        if (vectorOnly) {
+            world?.let { layer ->
+                drawLayer(
+                    layer, frame, view, gcjShift = false, applyGcj = false,
+                    fill = landFill, stroke = coastStroke, strokeWidthPx = 1f,
+                    fillOf = null,
+                )
+            }
         }
 
         // ---- 中国省界 ------------------------------------------------
-        province?.let { layer ->
-            drawLayer(
-                layer, frame, view, gcjShift, applyGcj = true,
-                fill = Color.Transparent, stroke = provinceStroke, strokeWidthPx = 1f,
-                fillOf = null,
-            )
+        // 全国概览时省界本来就是透明的，直接跳过整层。
+        if (provinceStroke != Color.Transparent) {
+            province?.let { layer ->
+                drawLayer(
+                    layer, frame, view, gcjShift, applyGcj = true,
+                    fill = Color.Transparent, stroke = provinceStroke, strokeWidthPx = 1f,
+                    fillOf = null,
+                )
+            }
         }
 
         // ---- 区县（EEW 时按烈度着色）---------------------------------
-        district?.let { layer ->
-            drawLayer(
-                layer, frame, view, gcjShift, applyGcj = true,
-                fill = Color.Transparent, stroke = DISTRICT_STROKE, strokeWidthPx = 1f,
-                fillOf = { name ->
-                    districtIntensity[name]?.let { intensityFill(it) } ?: Color.Transparent
-                },
-                // 平时整层完全透明（对齐 kanameishi eewBaseMapDefaultStroke 的 alpha=0）。
-                strokeOnlyShaded = true,
-            )
+        // 没有受影响区县时，区县层完全透明，避免每帧遍历 1011 个要素。
+        if (districtIntensity.isNotEmpty()) {
+            district?.let { layer ->
+                drawLayer(
+                    layer, frame, view, gcjShift, applyGcj = true,
+                    fill = Color.Transparent, stroke = DISTRICT_STROKE, strokeWidthPx = 1f,
+                    fillOf = { name ->
+                        districtIntensity[name]?.let { intensityFill(it) } ?: Color.Transparent
+                    },
+                    // 平时整层完全透明（对齐 kanameishi eewBaseMapDefaultStroke 的 alpha=0）。
+                    strokeOnlyShaded = true,
+                )
+            }
         }
     }
 
@@ -90,6 +113,8 @@ class VectorMapRenderer(private val data: VectorMapData?) {
      * 与桌面端的整数 zoom 预投影缓存同一口径。
      */
     private class Frame(centerLat: Double, centerLon: Double, zoom: Float) {
+        val centerLat = centerLat
+        val centerLon = centerLon
         val gz: Int = zoom.roundToInt().coerceIn(2, 20)
         val scale: Double = 2.0.pow(zoom.toDouble() - gz)
         val size: Double = worldSize(gz)
@@ -155,37 +180,40 @@ class VectorMapRenderer(private val data: VectorMapData?) {
     ) {
         val w = size.width.toDouble()
         val h = size.height.toDouble()
-        val wrapPx = frame.size * frame.scale   // 经度 +360° 对应的屏幕横向距离
-        for (feature in layer.features) {
+        val geometries = geometryCache(layer, frame.gz, gcjShift, applyGcj)
+        val centerX = projX(frame.centerLon, frame.gz)
+        val centerY = projY(frame.centerLat, frame.gz)
+        val offsetX = -centerX * frame.scale + w / 2.0
+        val offsetY = -centerY * frame.scale + h / 2.0
+        val localStrokeWidth = if (frame.scale > 0.0) strokeWidthPx / frame.scale.toFloat() else strokeWidthPx
+        val transformCache = arrayOfNulls<android.graphics.Matrix>(3)
+        fun transformFor(shift: Double): android.graphics.Matrix {
+            val slot = when (shift.toInt()) {
+                -360 -> 0
+                360 -> 2
+                else -> 1
+            }
+            return transformCache[slot] ?: android.graphics.Matrix().also { matrix ->
+                matrix.setValues(floatArrayOf(
+                    frame.scale.toFloat(), 0f,
+                        (offsetX + shift / 360.0 * frame.size * frame.scale).toFloat(),
+                    0f, frame.scale.toFloat(), offsetY.toFloat(),
+                    0f, 0f, 1f,
+                ))
+                transformCache[slot] = matrix
+            }
+        }
+
+        for ((index, feature) in geometries.withIndex()) {
             // 视口裁剪：包围盒落在可视区外的要素整条跳过
             //（世界层在 z>=8 时 95% 的要素都在屏外，不裁会白跑一遍 7 万顶点）。
             // 经度上按 -360/0/+360 三份判定，跨越日界线时两侧都补齐。
-            val b = GeoGeometry.boundsOf(feature.polygon)
+            val b = feature.bounds
             val copies = view.visibleLonCopies(b.minLat, b.minLon, b.maxLat, b.maxLon)
             if (copies.isEmpty()) continue
 
-            val path = Path().apply { fillType = PathFillType.EvenOdd }
-            var any = false
-            for (ring in feature.polygon) {
-                if (ring.size < 3) continue
-                for ((i, pt) in ring.withIndex()) {
-                    var lat = pt.first
-                    var lon = pt.second
-                    if (gcjShift && applyGcj) {
-                        // 只在绘制期施加一次，不缓存：与桌面端同一口径。
-                        val p = CoordinateTransform.wgs84ToGcj02(lat, lon)
-                        lat = p.first
-                        lon = p.second
-                    }
-                    val x = frame.sx(lon, w).toFloat()
-                    val y = frame.sy(lat, h).toFloat()
-                    if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
-                }
-                any = true
-            }
-            if (!any) continue
-
-            val own = fillOf?.invoke(feature.name) ?: Color.Transparent
+            val source = layer.features[index]
+            val own = fillOf?.invoke(source.name) ?: Color.Transparent
             val featureFill = if (fill != Color.Transparent) fill else own
             // 区县层：仅对已着色者描边（#bbbbbb，见 kanameishi eewBaseMapActiveStroke）。
             // 平时 districtIntensity 为空，于是整层既无描边也无填充 —— 与 kanameishi 一致。
@@ -193,10 +221,53 @@ class VectorMapRenderer(private val data: VectorMapData?) {
             val wantsStroke =
                 stroke != Color.Transparent && strokeWidthPx > 0f && (!strokeOnlyShaded || shaded)
             for (shift in copies) {
-                translate(left = (shift / 360.0 * wrapPx).toFloat()) {
-                    if (featureFill != Color.Transparent) drawPath(path, featureFill)
-                    if (wantsStroke) drawPath(path, stroke, style = Stroke(width = strokeWidthPx))
+                // Explicitly reproduce the old per-vertex formula:
+                // screen = world * scale + offset. Using Canvas.translate/scale
+                // here is order-dependent and made vectors drift while zooming.
+                val matrix = transformFor(shift)
+                val nativeCanvas = drawContext.canvas.nativeCanvas
+                val saveCount = nativeCanvas.save()
+                nativeCanvas.concat(matrix)
+                try {
+                    if (feature.hasGeometry && featureFill != Color.Transparent) drawPath(feature.path, featureFill)
+                    if (feature.hasGeometry && wantsStroke) {
+                        drawPath(feature.path, stroke, style = Stroke(width = localStrokeWidth))
+                    }
+                } finally {
+                    nativeCanvas.restoreToCount(saveCount)
                 }
+            }
+        }
+    }
+
+    private fun geometryCache(
+        layer: VectorMapData.VectorLayer,
+        zoom: Int,
+        gcjShift: Boolean,
+        applyGcj: Boolean,
+    ): List<CachedFeature> {
+        val key = GeometryCacheKey(layer.name, zoom, gcjShift, applyGcj)
+        return geometryCaches.getOrPut(key) {
+            layer.features.map { feature ->
+                val path = Path().apply { fillType = PathFillType.EvenOdd }
+                var any = false
+                for (ring in feature.polygon) {
+                    if (ring.size < 3) continue
+                    for ((i, pt) in ring.withIndex()) {
+                        var lat = pt.first
+                        var lon = pt.second
+                        if (gcjShift && applyGcj) {
+                            val shifted = CoordinateTransform.wgs84ToGcj02(lat, lon)
+                            lat = shifted.first
+                            lon = shifted.second
+                        }
+                        val x = projX(lon, zoom).toFloat()
+                        val y = projY(lat, zoom).toFloat()
+                        if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                    }
+                    any = true
+                }
+                CachedFeature(GeoGeometry.boundsOf(feature.polygon), path, any)
             }
         }
     }

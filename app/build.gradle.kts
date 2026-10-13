@@ -8,6 +8,7 @@ plugins {
     alias(libs.plugins.google.services)
     alias(libs.plugins.firebase.crashlytics)
     alias(libs.plugins.firebase.perf)
+    alias(libs.plugins.sentry.android.gradle)
 }
 
 android {
@@ -20,8 +21,8 @@ android {
         targetSdk = 37
         // 缺省值供本地开发；CI 推 tag 时用 -PversionName/-PversionCode 覆盖，
         // 使产物内的版本与 tag 一致（否则发 v1.0.4 仍会打出 versionName=1.0.3）。
-        versionCode = (providers.gradleProperty("versionCode").orNull ?: "10100").toInt()
-        versionName = providers.gradleProperty("versionName").orNull ?: "1.1.0"
+        versionCode = (providers.gradleProperty("versionCode").orNull ?: "10200").toInt()
+        versionName = providers.gradleProperty("versionName").orNull ?: "1.2.0"
         testInstrumentationRunner = "com.aloys23.komiraquake.IsolatedTestRunner"
     }
 
@@ -75,6 +76,17 @@ android {
     }
 }
 
+// Mapping 上传需要 Sentry auth token；本地/未配置 token 时跳过，避免 release 构建失败。
+// CI 设置 SENTRY_AUTH_TOKEN（或 -PsentryAuthToken）后会自动启用上传。
+val hasSentryAuthToken = providers.environmentVariable("SENTRY_AUTH_TOKEN").isPresent ||
+    providers.gradleProperty("sentryAuthToken").isPresent
+
+sentry {
+    org.set("4511504349396992")
+    projectName.set("4512247446175744")
+    autoUploadProguardMapping.set(hasSentryAuthToken)
+}
+
 kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
@@ -106,6 +118,7 @@ dependencies {
     implementation(libs.firebase.analytics)
     implementation(libs.firebase.crashlytics)
     implementation(libs.firebase.perf)
+    implementation(libs.sentry.android)
 
     // firebase-perf 经 appcompat 传递引入 fragment；lint 的
     // InvalidFragmentVersionForActivityResult 只在直接声明时才认可版本，故固定为已解析的 1.5.4。

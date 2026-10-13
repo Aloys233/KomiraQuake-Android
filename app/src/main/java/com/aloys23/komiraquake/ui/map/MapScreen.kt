@@ -1583,23 +1583,6 @@ fun MapScreen(
                     }
                 }
 
-                val event = focus ?: return@Canvas
-                val (fLatD, fLonD) = shift(event.latitude, event.longitude)
-                val fx = screenX(fLonD)
-                val fy = screenY(fLatD)
-
-                // px per km。墨卡托保角，水平/垂直同尺度：worldPx/360° ÷ (111.32·cosφ) km/°。
-                // GCJ-02 底图上的事件已经平移；波前的屏上尺度必须使用同一投影纬度，
-                // 否则圆环半径与自动缩放目标会有一小段持续偏差。
-                val cosLat = cos(fLatD * PI / 180.0).coerceAtLeast(0.01)
-                val pxPerKm = (TILE_SIZE * 2.0.pow(gz.toDouble()) * gScale / 360.0) / (111.32 * cosLat)
-
-                // 波前不透明度在绘制期求值：dispPKm/dispSKm 由帧循环更新，若在组合期读会每帧重组整块地图。
-                val pOpacity = if (dispPKm > 0.0) IntensityCalculator.waveOpacity(dispPKm, waveFadeKm) else 0.0
-                val sOpacity = if (dispSKm > 0.0) IntensityCalculator.waveOpacity(dispSKm, waveFadeKm) else 0.0
-                // S 波径向渐变填充的不透明度：只在影响半径内可见（对齐 kanameishi 的 sWaveFill）。
-                val sFillOpacity = if (dispSKm > 0.0) IntensityCalculator.waveFillOpacity(dispSKm, waveFadeKm) else 0.0
-
                 // 矢量层：世界陆地 / 省界 / 区县（EEW 时按烈度着色）。
                 // 压在瓦片之上、波前之下 —— 预警时用户既要看底图也要看烈度分布。
                 if (vectorActive) {
@@ -1621,6 +1604,25 @@ fun MapScreen(
                         }
                     }
                 }
+
+                // 矢量叠加层不依赖焦点事件；不能放在 `focus ?: return@Canvas` 之后，
+                // 否则无选中事件时只画瓦片，用户会误以为矢量层被瓦片压住了。
+                val event = focus ?: return@Canvas
+                val (fLatD, fLonD) = shift(event.latitude, event.longitude)
+                val fx = screenX(fLonD)
+                val fy = screenY(fLatD)
+
+                // px per km。墨卡托保角，水平/垂直同尺度：worldPx/360° ÷ (111.32·cosφ) km/°。
+                // GCJ-02 底图上的事件已经平移；波前的屏上尺度必须使用同一投影纬度，
+                // 否则圆环半径与自动缩放目标会有一小段持续偏差。
+                val cosLat = cos(fLatD * PI / 180.0).coerceAtLeast(0.01)
+                val pxPerKm = (TILE_SIZE * 2.0.pow(gz.toDouble()) * gScale / 360.0) / (111.32 * cosLat)
+
+                // 波前不透明度在绘制期求值：dispPKm/dispSKm 由帧循环更新，若在组合期读会每帧重组整块地图。
+                val pOpacity = if (dispPKm > 0.0) IntensityCalculator.waveOpacity(dispPKm, waveFadeKm) else 0.0
+                val sOpacity = if (dispSKm > 0.0) IntensityCalculator.waveOpacity(dispSKm, waveFadeKm) else 0.0
+                // S 波径向渐变填充的不透明度：只在影响半径内可见（对齐 kanameishi 的 sWaveFill）。
+                val sFillOpacity = if (dispSKm > 0.0) IntensityCalculator.waveFillOpacity(dispSKm, waveFadeKm) else 0.0
 
                 // P/S 波前圆：反解走时表得到半径（km），-1 表示不画。半径用平滑后的显示值。
                 if (dispPKm > 0.0) {

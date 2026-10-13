@@ -12,6 +12,8 @@ googleServices = "4.5.0"
 firebaseBom = "35.0.0"
 firebaseCrashlytics = "3.0.8"
 firebasePerf = "2.0.2"
+sentry = "8.58.0"
+sentryAndroidGradle = "6.23.0"
 junit = "4.13.2"
 json = "20240303"
 
@@ -40,6 +42,7 @@ firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "fir
 firebase-analytics = { module = "com.google.firebase:firebase-analytics" }
 firebase-crashlytics = { module = "com.google.firebase:firebase-crashlytics" }
 firebase-perf = { module = "com.google.firebase:firebase-perf" }
+sentry-android = { module = "io.sentry:sentry-android", version.ref = "sentry" }
 
 junit = { module = "junit:junit", version.ref = "junit" }
 json = { module = "org.json:json", version.ref = "json" }
@@ -51,3 +54,4 @@ compose-compiler = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "
 google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }
 firebase-crashlytics = { id = "com.google.firebase.crashlytics", version.ref = "firebaseCrashlytics" }
 firebase-perf = { id = "com.google.firebase.firebase-perf", version.ref = "firebasePerf" }
+sentry-android-gradle = { id = "io.sentry.android.gradle", version.ref = "sentryAndroidGradle" }

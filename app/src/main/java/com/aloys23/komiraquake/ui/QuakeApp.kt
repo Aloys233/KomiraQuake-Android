@@ -274,6 +274,7 @@ fun QuakeApp(container: AppContainer) {
                         event = event, dark = dark, standard = settings.intensityStandard,
                         userLat = location.latitude, userLon = location.longitude,
                         basemap = basemapById(settings.basemapId), tileLoader = tileLoader,
+                        vectorOverlay = settings.vectorOverlay,
                         onBack = { detailId = null }, modifier = Modifier.fillMaxSize(),
                     )
                 }

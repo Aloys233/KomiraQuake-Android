@@ -23,6 +23,7 @@ import com.aloys23.komiraquake.service.LocationService
 import com.aloys23.komiraquake.service.SystemNetworkGate
 import com.aloys23.komiraquake.service.WarningNotifier
 import com.aloys23.komiraquake.ui.map.TileCacheInterceptor
+import io.sentry.android.core.SentryAndroid
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -44,9 +45,19 @@ class KomiraApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        SentryAndroid.init(this) { options ->
+            options.dsn = SENTRY_DSN
+            options.environment = if (BuildConfig.DEBUG) "debug" else "production"
+            options.isSendDefaultPii = false
+        }
         container = AppContainer(this)
         registerActivityLifecycleCallbacks(container.foregroundGate)
         container.start()
+    }
+
+    private companion object {
+        const val SENTRY_DSN =
+            "https://b2cfec17f7ff789607f3e97bdf5dcaa5@o4511504349396992.ingest.us.sentry.io/4512247446175744"
     }
 }
 
