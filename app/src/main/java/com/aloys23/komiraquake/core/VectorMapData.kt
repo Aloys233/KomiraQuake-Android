@@ -18,7 +18,7 @@ class VectorMapData private constructor(
     val layers: List<VectorLayer>,
 ) {
     /** 一个地图要素（省 / 区县 / 洲）：名称 + 全部环（首环为外环，其余为洞）。 */
-    class VectorFeature(val name: String, val polygon: List<List<Pair<Double, Double>>>)
+    class VectorFeature(val name: String, val polygon: List<GeoRing>)
 
     class VectorLayer(
         val name: String,
@@ -125,7 +125,7 @@ class VectorMapData private constructor(
                     val ringCount = buf.short.toInt() and 0xFFFF
                     if (ringCount > MAX_RINGS) return null
 
-                    val polygon = ArrayList<List<Pair<Double, Double>>>(ringCount)
+                    val polygon = ArrayList<GeoRing>(ringCount)
                     for (ri in 0 until ringCount) {
                         val pointCount = buf.int
                         // 三角形才有面积；上限挡住被改坏的长度字段。
@@ -133,16 +133,17 @@ class VectorMapData private constructor(
                         // 读前先确认这一环的字节数在本块内。
                         if (pointCount.toLong() * 8 > (blockEnd - buf.position())) return null
 
-                        val ring = ArrayList<Pair<Double, Double>>(pointCount)
+                        // 交错写进 DoubleArray：(lat, lon) 顺序 —— 与 GeoGeometry 的取值口径一致。
+                        val ring = DoubleArray(pointCount * 2)
                         for (pi in 0 until pointCount) {
                             val qx = buf.int
                             val qy = buf.int
                             val lon = qx * unit + originLon
                             val lat = (qy * unit + originLat).coerceIn(-LAT_LIMIT, LAT_LIMIT)
-                            // (lat, lon) 顺序 —— 与 GeoGeometry 的取值口径一致。
-                            ring.add(lat to lon)
+                            ring[pi * 2] = lat
+                            ring[pi * 2 + 1] = lon
                         }
-                        polygon.add(ring)
+                        polygon.add(GeoRing(ring))
                     }
                     features.add(VectorFeature(fname, polygon))
                 }

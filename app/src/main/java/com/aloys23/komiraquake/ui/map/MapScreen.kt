@@ -135,7 +135,7 @@ private const val ZOOM_SENSITIVITY = 0.8f
 private val LN2 = ln(2.0)
 
 /** 程序化镜头补间时长（ms）：对齐桌面端 cameraDuration。 */
-private const val CAMERA_TWEEN_MS = 420L
+private const val CAMERA_TWEEN_MS = 600L
 /** 事件结束后保留当前镜头的时间，再回到默认镜头。 */
 private const val EVENT_END_RESET_DELAY_MS = 2L * 60L * 1000L
 /** 缩放按钮步进补间时长（ms）：对齐桌面端 zoomDuration。 */
@@ -222,8 +222,47 @@ internal fun shouldFinishWavesForFocus(
     wavesShown: Boolean,
 ): Boolean = wavesShown && wavesEventIdentity != null && wavesEventIdentity == currentFocusIdentity
 
-/** OutCubic 缓动：与桌面端 Easing.OutCubic 一致。 */
-private fun easeOutCubic(t: Double): Double { val u = 1.0 - t; return 1.0 - u * u * u }
+/// 三段式镜头缓动的节点：时间轴、路程进度、衔接处速度。
+private val CAMERA_KNOT_T = doubleArrayOf(0.0, 0.35, 0.75, 1.0)
+/// 平移：先快后慢，缩放主段内速度压到最低。
+private val CAMERA_PAN_P = doubleArrayOf(0.0, 0.60, 0.94, 1.0)
+private val CAMERA_PAN_M = doubleArrayOf(0.0, 2.0, 0.45, 0.0)
+/// 缩放：前段只轻微启动，主体集中在平移降速的第二段，尾段收口。
+private val CAMERA_ZOOM_P = doubleArrayOf(0.0, 0.10, 0.85, 1.0)
+private val CAMERA_ZOOM_M = doubleArrayOf(0.0, 0.7, 1.05, 0.0)
+
+/**
+ * 分段三次 Hermite 求值（与桌面端 MapView.cameraHermite 一致）：
+ * 节点处速度连续（无顿挫），各段单调（不会冲过头）。
+ */
+private fun cameraHermite(
+    t: Double,
+    ps: DoubleArray,
+    ms: DoubleArray,
+): Double {
+    if (t <= 0.0) return 0.0
+    if (t >= 1.0) return 1.0
+    var i = 0
+    while (i < CAMERA_KNOT_T.size - 2 && t > CAMERA_KNOT_T[i + 1]) i++
+    val h = CAMERA_KNOT_T[i + 1] - CAMERA_KNOT_T[i]
+    val u = (t - CAMERA_KNOT_T[i]) / h
+    val u2 = u * u
+    val u3 = u2 * u
+    return (2 * u3 - 3 * u2 + 1) * ps[i] +
+        (u3 - 2 * u2 + u) * h * ms[i] +
+        (-2 * u3 + 3 * u2) * ps[i + 1] +
+        (u3 - u2) * h * ms[i + 1]
+}
+
+private fun cameraPanEase(t: Double): Double = cameraHermite(t, CAMERA_PAN_P, CAMERA_PAN_M)
+
+private fun cameraZoomEase(t: Double): Double = cameraHermite(t, CAMERA_ZOOM_P, CAMERA_ZOOM_M)
+
+/** 纯缩放步进（滚轮/按钮）：立即起步的 OutCubic，180ms 内不拖沓。 */
+private fun cameraStepEase(t: Double): Double {
+    val u = 1.0 - t
+    return 1.0 - u * u * u
+}
 
 /** 瓦片加载失败重试：最多 3 次尝试，退避 500ms / 1000ms。为冷缓存瓦片源（如 Petal 高层）兜底。 */
 private const val TILE_MAX_ATTEMPTS = 3
@@ -430,6 +469,10 @@ private fun tileUrl(basemap: Basemap, x: Int, y: Int, z: Int): String {
 }
 
 private val tilePaint = android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+// 绘制期复用的矩形：连续拖动时每帧要画几十块瓦片，每块新建 RectF 会让 GC 在
+// 平移过程中持续抖动。drawBitmap 是同步调用，复用是安全的。
+private val tileDstRect = android.graphics.RectF()
+private val tileSrcRect = android.graphics.Rect()
 
 /**
  * 以亚像素位置绘制一块瓦片。位置与尺寸保持浮点，避免在连续缩放动画里逐帧取整造成
@@ -446,10 +489,11 @@ private fun DrawScope.drawTileBitmap(
 ) {
     if (bmp.width <= 0 || bmp.height <= 0 || sizePx <= 0f) return
     tilePaint.alpha = (alpha.coerceIn(0f, 1f) * 255f).roundToInt()
+    tileDstRect.set(left, top, left + sizePx, top + sizePx)
     drawContext.canvas.nativeCanvas.drawBitmap(
         bmp.asAndroidBitmap(),
         null,
-        android.graphics.RectF(left, top, left + sizePx, top + sizePx),
+        tileDstRect,
         tilePaint,
     )
 }
@@ -486,10 +530,12 @@ private fun DrawScope.drawParentTile(
         val sx = (wx % factor) * sub
         val sy = (tile.y % factor) * sub
         tilePaint.alpha = 255
+        tileSrcRect.set(sx, sy, sx + sub, sy + sub)
+        tileDstRect.set(px, py, px + sizePx, py + sizePx)
         drawContext.canvas.nativeCanvas.drawBitmap(
             parent.asAndroidBitmap(),
-            android.graphics.Rect(sx, sy, sx + sub, sy + sub),
-            android.graphics.RectF(px, py, px + sizePx, py + sizePx),
+            tileSrcRect,
+            tileDstRect,
             tilePaint,
         )
         return true
@@ -800,8 +846,15 @@ fun MapScreen(
     var zoom by remember { mutableFloatStateOf(DEFAULT_OVERVIEW_ZOOM) }
 
     // 矢量底图数据（3.7 MiB，assets）。缺失或损坏时为 null，地图退回纯栅格。
+    // 解析会为 34 万个点建对象，绝不能在 composition 里同步做：那样地图首次打开会整帧卡住
+    //（桌面端同样把 .kvb 的加载移出了首帧）。这里放后台线程，瓦片先出来，矢量层稍后补上。
     val context = LocalContext.current
-    val vectorRenderer = remember { VectorMapRenderer.load(context) }
+    var vectorRenderer by remember { mutableStateOf<VectorMapRenderer?>(null) }
+    LaunchedEffect(context) {
+        if (vectorRenderer == null) {
+            vectorRenderer = withContext(Dispatchers.IO) { VectorMapRenderer.load(context) }
+        }
+    }
     val vectorOnly = basemap.isVector
     val vectorActive = vectorOnly || vectorOverlay
     // 叠加到 GCJ-02 栅格底图时才对矢量顶点纠偏；纯矢量模式下不纠偏
@@ -813,15 +866,14 @@ fun MapScreen(
     var districtIntensity by remember { mutableStateOf<Map<String, Double>>(emptyMap()) }
     LaunchedEffect(focusEvent?.identity, vectorActive, vectorRenderer) {
         val event = focusEvent
-        if (event == null || !vectorActive || vectorRenderer == null ||
-            event.magnitude <= 0.0
-        ) {
+        val renderer = vectorRenderer
+        if (event == null || !vectorActive || renderer == null || event.magnitude <= 0.0) {
             districtIntensity = emptyMap()
             return@LaunchedEffect
         }
         districtIntensity = withContext(Dispatchers.Default) {
             VectorMapRenderer.computeDistrictIntensity(
-                vectorRenderer, event.magnitude, event.depth,
+                renderer, event.magnitude, event.depth,
                 event.latitude, event.longitude,
             )
         }
@@ -1062,10 +1114,15 @@ fun MapScreen(
         }
 
         /**
-         * 平滑移动到目标镜头（对齐桌面端 moveCamera）：OutCubic 补间，经度走最短路径。
+         * 平滑移动到目标镜头（对齐桌面端 moveCamera）：三段式补间，缩放主段内平移降速，经度走最短路径。
          * animate=false / 减少动态效果时立即生效（用于逐帧跟随）。
          */
-        fun applyCamera(cam: Camera, durationMs: Long, animate: Boolean) {
+        fun applyCamera(
+            cam: Camera,
+            durationMs: Long,
+            animate: Boolean,
+            zoomOnly: Boolean = false,
+        ) {
             val generation = cameraAnimationGeneration + 1L
             cameraAnimationGeneration = generation
             cameraJob?.cancel()
@@ -1090,10 +1147,13 @@ fun MapScreen(
                     while (true) {
                         val now = withFrameNanos { it }
                         val t = ((now - startNanos) / 1_000_000.0 / durationMs).coerceIn(0.0, 1.0)
-                        val e = easeOutCubic(t)
-                        centerLat = startLat + (target.lat - startLat) * e
-                        centerLon = wrapLon(startLon + (targetLon - startLon) * e)
-                        zoom = (startZoom + (target.zoom - startZoom) * e).toFloat()
+                        // 纯缩放步进用一条立即起步的曲线，连点/连续滚动不拖沓；
+                        // 飞行取景仍用三段式（缩放主体落在平移降速段）。
+                        val pan = if (zoomOnly) cameraStepEase(t) else cameraPanEase(t)
+                        val ez = if (zoomOnly) pan else cameraZoomEase(t)
+                        centerLat = startLat + (target.lat - startLat) * pan
+                        centerLon = wrapLon(startLon + (targetLon - startLon) * pan)
+                        zoom = (startZoom + (target.zoom - startZoom) * ez).toFloat()
                         if (t >= 1.0) break
                     }
                 } finally {
@@ -1735,7 +1795,7 @@ fun MapScreen(
                     val target = (zoom.roundToInt() + 1).toFloat()
                         .coerceAtMost(minOf(MAX_ZOOM, basemap.maxZoom.toFloat()))
                     if (target > zoom.roundToInt()) {
-                        applyCamera(Camera(centerLat, centerLon, target), ZOOM_TWEEN_MS, animate = true)
+                        applyCamera(Camera(centerLat, centerLon, target), ZOOM_TWEEN_MS, animate = true, zoomOnly = true)
                     }
                 }
                 // 缩小
@@ -1746,7 +1806,7 @@ fun MapScreen(
                     interactionEvents.tryEmit(Unit)
                     val target = (zoom.roundToInt() - 1).toFloat().coerceAtLeast(minZoom)
                     if (target < zoom.roundToInt()) {
-                        applyCamera(Camera(centerLat, centerLon, target), ZOOM_TWEEN_MS, animate = true)
+                        applyCamera(Camera(centerLat, centerLon, target), ZOOM_TWEEN_MS, animate = true, zoomOnly = true)
                     }
                 }
                 MapFloatingDivider()

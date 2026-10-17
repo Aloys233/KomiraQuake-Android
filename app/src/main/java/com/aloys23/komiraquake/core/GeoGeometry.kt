@@ -14,11 +14,33 @@ import kotlin.math.sqrt
  * 坐标一律为 WGS-84 度。经度不在这里做环绕：渲染层按视口把要素按 ±360° 复制绘制，
  * 副本只是经度整体平移，故点在面内的判定仍是简单的经度直接比较。
  */
+/**
+ * 一条闭合环：经纬度按 [lat, lon, lat, lon, …] 交错存进 [DoubleArray]（度，WGS-84）。
+ *
+ * 早先用 `List<Pair<Double, Double>>`：34 万个点每个都要一个 Pair 加两个装箱 Double，
+ * 约 20 MB 垃圾；压成 DoubleArray 后同样数据约 5 MB，解析时的临时分配也少一个数量级。
+ */
+class GeoRing(val coords: DoubleArray) {
+    val size: Int get() = coords.size / 2
+
+    fun lat(index: Int): Double = coords[index * 2]
+    fun lon(index: Int): Double = coords[index * 2 + 1]
+
+    companion object {
+        /** 便于测试与小数据构造（生产路径直接写 DoubleArray）。 */
+        fun of(points: List<Pair<Double, Double>>): GeoRing {
+            val out = DoubleArray(points.size * 2)
+            for (i in points.indices) {
+                out[i * 2] = points[i].first
+                out[i * 2 + 1] = points[i].second
+            }
+            return GeoRing(out)
+        }
+    }
+}
+
 object GeoGeometry {
     private const val KM_PER_DEGREE_LAT = 111.32
-
-    /** 一条闭合环的经纬度序列（度，WGS-84）。首尾点相同。 */
-    typealias GeoRing = List<Pair<Double, Double>>
 
     /** 一个面的全部环：首个为外环，其余为洞（飞地、内陆空洞）。 */
     typealias GeoPolygon = List<GeoRing>
@@ -71,10 +93,10 @@ object GeoGeometry {
         val n = ring.size
         var j = n - 1
         for (i in 0 until n) {
-            val latI = ring[i].first
-            val lonI = ring[i].second
-            val latJ = ring[j].first
-            val lonJ = ring[j].second
+            val latI = ring.lat(i)
+            val lonI = ring.lon(i)
+            val latJ = ring.lat(j)
+            val lonJ = ring.lon(j)
             // 半开区间比较，避免顶点恰好落在射线所在纬度上时被重复计数。
             if ((latI > lat) != (latJ > lat)) {
                 val t = (lat - latI) / (latJ - latI)
@@ -116,10 +138,10 @@ object GeoGeometry {
             if (n < 2) continue
             var j = n - 1
             for (i in 0 until n) {
-                val ax = plane.x(ring[j].second)
-                val ay = plane.y(ring[j].first)
-                val bx = plane.x(ring[i].second)
-                val by = plane.y(ring[i].first)
+                val ax = plane.x(ring.lon(j))
+                val ay = plane.y(ring.lat(j))
+                val bx = plane.x(ring.lon(i))
+                val by = plane.y(ring.lat(i))
                 bestSq = min(bestSq, squaredDistanceToSegment2D(0.0, 0.0, ax, ay, bx, by))
                 j = i
             }
@@ -169,7 +191,9 @@ object GeoGeometry {
         var maxLon = 0.0
         var first = true
         for (ring in polygon) {
-            for ((lat, lon) in ring) {
+            for (i in 0 until ring.size) {
+                val lat = ring.lat(i)
+                val lon = ring.lon(i)
                 if (first) {
                     minLat = lat; maxLat = lat; minLon = lon; maxLon = lon
                     first = false

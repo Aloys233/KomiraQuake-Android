@@ -13,8 +13,8 @@ class GeoGeometryTest {
     private val kmPerDeg = 111.32
 
     /** 1° 见方的闭合环（首尾点相同）。 */
-    private val square = listOf(
-        0.0 to 0.0, 0.0 to 1.0, 1.0 to 1.0, 1.0 to 0.0, 0.0 to 0.0,
+    private val square = GeoRing.of(
+        listOf(0.0 to 0.0, 0.0 to 1.0, 1.0 to 1.0, 1.0 to 0.0, 0.0 to 0.0),
     )
 
     @Test
@@ -31,11 +31,11 @@ class GeoGeometryTest {
     fun holeIsNotPartOfTheFace() {
         // 外环 0..3，其内挖一个 1..2 的洞。洞内必须判为「不在」——
         // 若用「任一环命中即命中」会误判为在内，区县着色就会把洞画成实心。
-        val outer = listOf(
-            0.0 to 0.0, 0.0 to 3.0, 3.0 to 3.0, 3.0 to 0.0, 0.0 to 0.0,
+        val outer = GeoRing.of(
+            listOf(0.0 to 0.0, 0.0 to 3.0, 3.0 to 3.0, 3.0 to 0.0, 0.0 to 0.0),
         )
-        val hole = listOf(
-            1.0 to 1.0, 1.0 to 2.0, 2.0 to 2.0, 2.0 to 1.0, 1.0 to 1.0,
+        val hole = GeoRing.of(
+            listOf(1.0 to 1.0, 1.0 to 2.0, 2.0 to 2.0, 2.0 to 1.0, 1.0 to 1.0),
         )
         val withHole = listOf(outer, hole)
 
@@ -66,8 +66,8 @@ class GeoGeometryTest {
         // 赤道上无 cos 收缩。
         assertEquals(0.5 * kmPerDeg, GeoGeometry.distanceToPolygonKm(face, 0.0, 1.5), 0.5)
         // 面须跨过查询点所在纬度，否则最近点是角点而非正东的边。
-        val midLat = listOf(
-            40.0 to 0.0, 40.0 to 1.0, 41.0 to 1.0, 41.0 to 0.0, 40.0 to 0.0,
+        val midLat = GeoRing.of(
+            listOf(40.0 to 0.0, 40.0 to 1.0, 41.0 to 1.0, 41.0 to 0.0, 40.0 to 0.0),
         )
         val expected = 0.5 * kmPerDeg * kotlin.math.cos(Math.toRadians(40.5))
         assertEquals(

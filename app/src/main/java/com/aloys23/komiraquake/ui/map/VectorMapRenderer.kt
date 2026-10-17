@@ -43,7 +43,6 @@ class VectorMapRenderer(private val data: VectorMapData?) {
 
     private data class GeometryCacheKey(
         val layerName: String,
-        val zoom: Int,
         val gcjShift: Boolean,
         val applyGcj: Boolean,
     )
@@ -115,9 +114,12 @@ class VectorMapRenderer(private val data: VectorMapData?) {
     private class Frame(centerLat: Double, centerLon: Double, zoom: Float) {
         val centerLat = centerLat
         val centerLon = centerLon
-        val gz: Int = zoom.roundToInt().coerceIn(2, 20)
-        val scale: Double = 2.0.pow(zoom.toDouble() - gz)
-        val size: Double = worldSize(gz)
+        // 与桌面端一致：几何只按一个**固定参考层级**投影一次，绘制时整体乘 2^(zoom-kRefZoom)。
+        // 曾经按 round(zoom) 缓存 —— 每跨过一个整数层级就要重建全部 Path（34 万点），
+        // 捏合缩放时正好在动画中途卡一下，而且访问过的层级会一直囤在内存里。
+        val gz: Int = kRefZoom
+        val scale: Double = 2.0.pow(zoom.toDouble() - kRefZoom)
+        val size: Double = worldSize(kRefZoom)
         val originX: Double = projX(centerLon, gz) * scale
         val originY: Double = projY(centerLat, gz) * scale
 
@@ -150,6 +152,9 @@ class VectorMapRenderer(private val data: VectorMapData?) {
         fun contains(minLat: Double, minLon: Double, maxLat: Double, maxLon: Double): Boolean =
             maxLon >= westLon && minLon <= eastLon && minLat <= northLat && maxLat >= southLat
 
+        /** 视口是否跨过 ±180°：只有跨了才需要画 ±360° 副本，绝大多数帧都是 false。 */
+        val crossesAntimeridian: Boolean = westLon < -180.0 || eastLon > 180.0
+
         /**
          * 数据只含 [-180,180] 的一份几何；相机经度被夹在 ±180，但视口可越界。
          * 视口跨越日界线时，把要素按 -360/0/+360 三份分别判定，命中的副本都要画，
@@ -180,7 +185,7 @@ class VectorMapRenderer(private val data: VectorMapData?) {
     ) {
         val w = size.width.toDouble()
         val h = size.height.toDouble()
-        val geometries = geometryCache(layer, frame.gz, gcjShift, applyGcj)
+        val geometries = geometryCache(layer, gcjShift, applyGcj)
         val centerX = projX(frame.centerLon, frame.gz)
         val centerY = projY(frame.centerLat, frame.gz)
         val offsetX = -centerX * frame.scale + w / 2.0
@@ -204,65 +209,77 @@ class VectorMapRenderer(private val data: VectorMapData?) {
             }
         }
 
-        for ((index, feature) in geometries.withIndex()) {
-            // 视口裁剪：包围盒落在可视区外的要素整条跳过
-            //（世界层在 z>=8 时 95% 的要素都在屏外，不裁会白跑一遍 7 万顶点）。
-            // 经度上按 -360/0/+360 三份判定，跨越日界线时两侧都补齐。
-            val b = feature.bounds
-            val copies = view.visibleLonCopies(b.minLat, b.minLon, b.maxLat, b.maxLon)
-            if (copies.isEmpty()) continue
+        val nativeCanvas = drawContext.canvas.nativeCanvas
+        // 同一份经度副本的变换只 concat 一次：旧实现每个要素都 save/concat/restore，
+        // 区县着色时一帧要几百次。按「副本」复用，绘制顺序与逐要素处理完全一致。
+        var appliedShift = Double.NaN
+        var savedState = -1
+        try {
+            for ((index, feature) in geometries.withIndex()) {
+                // 视口裁剪：包围盒落在可视区外的要素整条跳过
+                //（世界层在 z>=8 时 95% 的要素都在屏外，不裁会白跑一遍 7 万顶点）。
+                val b = feature.bounds
+                val crosses = view.crossesAntimeridian
+                if (!crosses && !view.contains(b.minLat, b.minLon, b.maxLat, b.maxLon)) continue
 
-            val source = layer.features[index]
-            val own = fillOf?.invoke(source.name) ?: Color.Transparent
-            val featureFill = if (fill != Color.Transparent) fill else own
-            // 区县层：仅对已着色者描边（#bbbbbb，见 kanameishi eewBaseMapActiveStroke）。
-            // 平时 districtIntensity 为空，于是整层既无描边也无填充 —— 与 kanameishi 一致。
-            val shaded = own != Color.Transparent
-            val wantsStroke =
-                stroke != Color.Transparent && strokeWidthPx > 0f && (!strokeOnlyShaded || shaded)
-            for (shift in copies) {
-                // Explicitly reproduce the old per-vertex formula:
-                // screen = world * scale + offset. Using Canvas.translate/scale
-                // here is order-dependent and made vectors drift while zooming.
-                val matrix = transformFor(shift)
-                val nativeCanvas = drawContext.canvas.nativeCanvas
-                val saveCount = nativeCanvas.save()
-                nativeCanvas.concat(matrix)
-                try {
-                    if (feature.hasGeometry && featureFill != Color.Transparent) drawPath(feature.path, featureFill)
+                val source = layer.features[index]
+                val own = fillOf?.invoke(source.name) ?: Color.Transparent
+                val featureFill = if (fill != Color.Transparent) fill else own
+                // 区县层：仅对已着色者描边（#bbbbbb，见 kanameishi eewBaseMapActiveStroke）。
+                // 平时 districtIntensity 为空，于是整层既无描边也无填充 —— 与 kanameishi 一致。
+                val shaded = own != Color.Transparent
+                val wantsStroke =
+                    stroke != Color.Transparent && strokeWidthPx > 0f && (!strokeOnlyShaded || shaded)
+
+                // -360 / 0 / +360：跨日界线时两侧都补齐。不跨时只有 0 一份，
+                // 用 IntRange 循环而不是为每个要素分配一个 List。
+                for (k in if (crosses) -1..1 else 0..0) {
+                    val shift = k * 360.0
+                    if (!view.contains(b.minLat, b.minLon + shift, b.maxLat, b.maxLon + shift)) continue
+                    // Explicitly reproduce the old per-vertex formula:
+                    // screen = world * scale + offset. Using Canvas.translate/scale
+                    // here is order-dependent and made vectors drift while zooming.
+                    if (shift != appliedShift) {
+                        if (savedState >= 0) nativeCanvas.restoreToCount(savedState)
+                        savedState = nativeCanvas.save()
+                        nativeCanvas.concat(transformFor(shift))
+                        appliedShift = shift
+                    }
+                    if (feature.hasGeometry && featureFill != Color.Transparent) {
+                        drawPath(feature.path, featureFill)
+                    }
                     if (feature.hasGeometry && wantsStroke) {
                         drawPath(feature.path, stroke, style = Stroke(width = localStrokeWidth))
                     }
-                } finally {
-                    nativeCanvas.restoreToCount(saveCount)
                 }
             }
+        } finally {
+            if (savedState >= 0) nativeCanvas.restoreToCount(savedState)
         }
     }
 
     private fun geometryCache(
         layer: VectorMapData.VectorLayer,
-        zoom: Int,
         gcjShift: Boolean,
         applyGcj: Boolean,
     ): List<CachedFeature> {
-        val key = GeometryCacheKey(layer.name, zoom, gcjShift, applyGcj)
+        val key = GeometryCacheKey(layer.name, gcjShift, applyGcj)
         return geometryCaches.getOrPut(key) {
             layer.features.map { feature ->
                 val path = Path().apply { fillType = PathFillType.EvenOdd }
                 var any = false
                 for (ring in feature.polygon) {
                     if (ring.size < 3) continue
-                    for ((i, pt) in ring.withIndex()) {
-                        var lat = pt.first
-                        var lon = pt.second
+                    for (i in 0 until ring.size) {
+                        var lat = ring.lat(i)
+                        var lon = ring.lon(i)
                         if (gcjShift && applyGcj) {
                             val shifted = CoordinateTransform.wgs84ToGcj02(lat, lon)
                             lat = shifted.first
                             lon = shifted.second
                         }
-                        val x = projX(lon, zoom).toFloat()
-                        val y = projY(lat, zoom).toFloat()
+                        val x = projX(lon, kRefZoom).toFloat()
+                        val y = projY(lat, kRefZoom).toFloat()
                         if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
                     }
                     any = true
@@ -357,6 +374,9 @@ private fun intensityFill(raw: Double): Color =
 
 /** 区县已着色者的描边色：kanameishi eewBaseMapActiveStroke = #bbbbbb。 */
 private val DISTRICT_STROKE = Color(0xFFBBBBBB)
+
+/** 几何投影的固定参考层级（对齐桌面端 VectorMapItem::kRefZoom）。 */
+private const val kRefZoom = 10
 
 private fun unprojLon(x: Double, size: Double) = x / size * 360.0 - 180.0
 

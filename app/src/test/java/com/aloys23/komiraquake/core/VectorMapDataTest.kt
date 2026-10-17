@@ -40,14 +40,20 @@ class VectorMapDataTest {
 
         // 全部环显式闭合，且点数 >= 4。
         val allClosed = district.features.all { f ->
-            f.polygon.all { it.size >= 4 && it.first() == it.last() }
+            f.polygon.all { ring ->
+                ring.size >= 4 &&
+                    ring.lat(0) == ring.lat(ring.size - 1) &&
+                    ring.lon(0) == ring.lon(ring.size - 1)
+            }
         }
         assertTrue(allClosed)
 
         // 坐标落在中国的经纬范围内（量化原点减法未出错、lat/lon 未写反）。
         val inRange = district.features.all { f ->
             f.polygon.all { ring ->
-                ring.all { (lat, lon) -> lat in 3.0..54.0 && lon in 73.0..136.0 }
+                (0 until ring.size).all { i ->
+                    ring.lat(i) in 3.0..54.0 && ring.lon(i) in 73.0..136.0
+                }
             }
         }
         assertTrue("district coords dequantize into China's bbox", inRange)
@@ -62,7 +68,9 @@ class VectorMapDataTest {
         // 运行期按视口 ±360 环绕，数据侧不再输出日界副本，故经度不越界。
         assertTrue("maxLon=${world.bounds.maxLon}", world.bounds.maxLon <= 180.0001)
         val beyond = world.features.any { f ->
-            f.polygon.any { ring -> ring.any { (_, lon) -> lon > 180.0001 || lon < -180.0001 } }
+            f.polygon.any { ring ->
+                (0 until ring.size).any { i -> ring.lon(i) > 180.0001 || ring.lon(i) < -180.0001 }
+            }
         }
         assertTrue("world must not carry >180 duplicates", !beyond)
         // 上游 global 剔除了中/日（另有单独图层），生成器已并入溶解后的陆地轮廓。
